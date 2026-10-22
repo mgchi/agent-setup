@@ -1,0 +1,105 @@
+Agent setup
+
+A public toolkit for a local context store and Claude/Codex adviser workflow.
+This repository contains reusable code and blank templates. Keep private
+knowledge, credentials, transcripts, and account settings outside the checkout.
+
+Install on a Mac
+
+Install Git and uv (brew install uv), then run:
+
+   git clone https://github.com/mgchi/agent-setup.git
+   cd agent-setup
+   ./install
+   agent-context project add my-project /absolute/path/to/project
+
+If needed, add ~/.local/bin to PATH in your shell startup file:
+
+   export PATH="$HOME/.local/bin:$PATH"
+
+Install and sign in to the Claude and Codex CLIs separately. Conductor, agent
+accounts, connectors, and access to the configured models require their own
+setup. Restart agent sessions after installation. In Codex, approve installed
+hooks through /hooks when prompted; hook approval is a separate step.
+
+Register project paths on each machine. Use agent-context project list to see
+registrations and agent-context status --cwd /path/to/project to inspect one.
+Registered Git worktrees share context. Separate projects and nested repositories
+remain isolated. Personal context applies across projects; advisers are disabled
+in unregistered projects unless an explicit personal override enables them.
+
+Platform support
+
+The installer and isolated installation checks are tested on macOS. Linux is
+unverified. Native Windows is unsupported because the runtime uses POSIX tools
+and filesystem behavior. Conductor desktop runs on macOS; Linux cloud workspaces
+need separate validation. The installer uses Python 3.14 and pinned dependencies.
+
+How it works
+
+Entry hooks load a small personal and project context packet. The lead owns edits
+and validation. Independent adviser defaults are claude-fable-5-1 and gpt-6-astra
+at maximum effort. These are configurable and depend on your account's access.
+Workers receive sanitized task, candidate, and evidence text. Bounded waits and
+graceful handling of failures and usage limits let the lead continue. Claude
+workers disable session persistence; Codex workers use ephemeral sessions.
+
+The lead checkpoints explicit preferences, accepted decisions, and verified
+lessons under stable keys. Size limits, retention, and compaction keep context
+small. Local macOS maintenance runs at login and 04:15. Existing lead models and
+effort settings are preserved. Existing ChatGPT conversations are not deleted.
+
+Private state and project context
+
+State defaults to ~/context. Personal context is ~/context/local/personal.md;
+project context is ~/context/workspaces/<slug>. Machine configuration lives in
+~/.config/agent-context. The installer preserves context, custom roots, project
+registrations, preferences, unrelated settings, and lead settings.
+
+Loaded context is sent to the hosted lead model you use. Privacy guards and
+sanitization reduce accidental disclosure; they cannot guarantee confidentiality.
+Review outgoing artifacts and tool inputs. Keep credentials out of memory.
+
+External-source refresh
+
+External refresh defaults off and is separate from daily local maintenance.
+Supported sources are Slack, Linear, Notion, Granola, and GitHub. To enable it,
+configure a registered refresh.project, an existing nonsymlink
+refresh.resource_root, the intended sources and connectors, and a separate
+schedule. Customize the local refresh templates and scope before enabling it.
+Installation does not transfer connector authentication or authorize messages
+or changes in external services.
+
+Moving to another computer
+
+Clone and install the public toolkit, then register project paths again.
+Transfer private knowledge separately using encryption. Stop context jobs before
+copying state.sqlite3, or use SQLite's backup facility for a consistent copy.
+Omit temporary runs, captures, transcripts, logs, and machine configuration.
+Review source links and local paths on the destination.
+
+Updates
+
+   cd /path/to/agent-setup
+   git pull --ff-only
+   ./install
+
+Review changes before updating. The installer merges managed configuration
+sections and preserves existing private data. Restart agent sessions afterward.
+
+Testing and recovery
+
+   ./install --home /absolute/path/to/temporary-home
+   ./install --home /absolute/path/to/temporary-home
+   /absolute/path/to/temporary-home/.local/share/agent-context/.venv/bin/python \
+     -m unittest discover -s runtime -q
+
+--home isolates installation and skips launchctl activation. --no-activate skips
+activation for a normal installation. --seed FILE accepts an explicit local
+configuration seed. Neither option transfers private knowledge automatically.
+
+The installer validates settings before configuration writes and rolls back
+changed configuration files on failure. Dependency installation happens first
+and is outside that rollback. Backups and their manifests live under
+~/.config/agent-context/backups. Restore selected files from a backup when needed;
+another computer's configuration may contain different paths and settings.

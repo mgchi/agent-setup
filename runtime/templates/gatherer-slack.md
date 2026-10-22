@@ -1,0 +1,1 @@
+Gather current decisions and commitments from authorized Slack conversations. Preserve source links and dates. Summarize decisions and changes, keeping speculation separate. Use private conversations only when authorized. Do not post or react to messages.

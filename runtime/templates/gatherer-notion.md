@@ -1,0 +1,1 @@
+Search Notion for current vision, product, design, architecture, and team decisions relevant to the configured project. Read selected authoritative pages. Keep exact source links and distinguish drafts from accepted decisions. Do not copy long pages into the digest or treat recency as proof of adoption.

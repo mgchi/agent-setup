@@ -1,0 +1,83 @@
+#!/bin/sh
+set -eu
+umask 077
+
+setup_source=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+setup_home=$HOME
+setup_seed=
+setup_activate=true
+setup_custom_home=false
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --home|--seed)
+            if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+                echo "Missing value for $1" >&2
+                exit 2
+            fi
+            if [ "$1" = --home ]; then
+                setup_home=$2
+                setup_custom_home=true
+            else
+                setup_seed=$2
+            fi
+            shift 2
+            ;;
+        --no-activate)
+            setup_activate=false
+            shift
+            ;;
+        --help|-h)
+            echo 'Usage: ./install [--home PATH] [--seed FILE] [--no-activate]'
+            echo 'Installs the local workflow. --home isolates installation and skips launchctl.'
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            exit 2
+            ;;
+    esac
+done
+
+setup_uv=$(command -v uv || true)
+if [ -z "$setup_uv" ]; then
+    for setup_candidate in /opt/homebrew/bin/uv /usr/local/bin/uv "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv"; do
+        if [ -x "$setup_candidate" ]; then
+            setup_uv=$setup_candidate
+            break
+        fi
+    done
+fi
+if [ -z "$setup_uv" ]; then
+    echo 'Install uv first (brew install uv), then rerun ./install.' >&2
+    exit 1
+fi
+
+mkdir -p -- "$setup_home"
+setup_home=$(CDPATH= cd -- "$setup_home" && pwd -P)
+setup_runtime=$setup_home/.local/share/agent-context
+for setup_path in "$setup_home/.local" "$setup_home/.local/share" "$setup_runtime" "$setup_runtime/.venv"; do
+    if [ -L "$setup_path" ]; then
+        echo "Preserve the existing symlink before installing: $setup_path" >&2
+        exit 1
+    fi
+done
+mkdir -p -- "$setup_runtime"
+if [ ! -e "$setup_runtime/.venv" ]; then
+    "$setup_uv" venv --python 3.14 "$setup_runtime/.venv"
+fi
+if [ ! -x "$setup_runtime/.venv/bin/python" ]; then
+    echo 'Existing runtime environment has no working Python. Preserve it before repairing.' >&2
+    exit 1
+fi
+"$setup_uv" pip install --python "$setup_runtime/.venv/bin/python" --requirement "$setup_source/requirements.txt"
+
+set -- --apply --home "$setup_home"
+if [ -n "$setup_seed" ]; then
+    set -- "$@" --seed "$setup_seed"
+fi
+if [ "$setup_activate" = true ] && [ "$setup_custom_home" = false ] && [ "$(uname -s)" = Darwin ]; then
+    set -- "$@" --activate
+fi
+"$setup_runtime/.venv/bin/python" "$setup_source/runtime/install_local.py" "$@"
+echo 'Installed. Add ~/.local/bin to PATH, restart your agent session, and register your projects.'

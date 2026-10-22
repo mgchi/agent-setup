@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+.env*
+.context/
+*.db
+*.db-*
+*.sqlite*
+*.age
+*.tar*
+*.log
+settings.json

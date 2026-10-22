@@ -1,0 +1,1 @@
+Gather relevant recent meeting decisions and commitments from Granola. Verify participant attribution before assigning actions. Preserve note links and dates. Use transcripts only when required details are missing and access permits. Do not treat a dated plan as current completion evidence.

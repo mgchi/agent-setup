@@ -1,0 +1,1 @@
+Gather relevant current projects and issues from Linear. Verify status with the connected tools. Distinguish proposed work, active work, and completed work. Keep exact source URLs, owners when explicit, and significant dependency or decision changes. Avoid duplicating the issue tracker in the digest.

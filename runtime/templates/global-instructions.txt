@@ -1,0 +1,9 @@
+## Local context and collaboration
+
+Use the context-workflow skill at {{HOME}}/.claude/skills/context-workflow/SKILL.md at task entry and completion. An entry hook receipt means entry already ran. The executable is {{HOME}}/.local/bin/agent-context.
+
+Load personal context and only the relevant registered project context. Verify source links before acting on mutable facts. Current instructions and repository rules govern the work. The lead owns edits and validation. Advisers receive sanitized task, candidate, and evidence text only; never pass context packets. A provider error, exhausted limit, or pending review permits the lead to finish after one bounded wait.
+
+Before finishing, checkpoint explicit preferences, accepted decisions, or verified reusable lessons with evidence and stable keys. An empty checkpoint is valid. The checkpoint outbox records decisions once; do not append the same decision manually. Workers with AGENT_CONTEXT_WORKER=1 or AGENT_CONTEXT_REFRESH=1 skip orchestration. Excluded projects retain their own workflow. Keep privacy guards active in both cases.
+
+Sensitive context stays private. Sanitize tool inputs, artifacts, messages, commits, tickets, and PRs. Keep temporary task inputs under {{CONTEXT_ROOT}}/local/ and remove them after capture. Review outgoing content before sending. Hooks cannot guarantee confidentiality; hosted models receive context loaded into their sessions.
