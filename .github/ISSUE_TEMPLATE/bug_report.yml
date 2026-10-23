@@ -1,0 +1,44 @@
+name: Bug report
+description: Report a reproducible problem using synthetic data.
+title: "bug: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Keep private context, credentials, transcripts, and account configuration out of this report.
+        Report security vulnerabilities through the Security tab's private reporting flow.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Run git rev-parse --short HEAD in the toolkit checkout.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, architecture, and relevant agent CLI versions.
+      placeholder: macOS, Apple silicon, Claude and Codex CLI versions
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Use a temporary home and a fictional project when possible.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include only the relevant sanitized error. Do not paste full session logs.
+    validations:
+      required: true

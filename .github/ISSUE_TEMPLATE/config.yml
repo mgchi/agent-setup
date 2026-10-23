@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and ideas
+    url: https://github.com/mgchi/agent-setup/discussions
+    about: Ask about setup, workflows, or a potential contribution.
+  - name: Report a vulnerability privately
+    url: https://github.com/mgchi/agent-setup/security/advisories/new
+    about: Report security problems without disclosing them in a public issue.

@@ -1,0 +1,40 @@
+#!/bin/sh
+set -eu
+umask 077
+
+check_source=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+check_directory=$(mktemp -d "${TMPDIR:-/tmp}/agent-context-check.XXXXXX")
+trap 'rm -rf -- "$check_directory"' 0
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+check_home=$check_directory/home
+check_python=$check_home/.local/share/agent-context/.venv/bin/python
+
+cd "$check_source"
+echo 'Checking installation in a temporary home...'
+if ! ./install --home "$check_home" --no-activate > "$check_directory/first-install.log"; then
+    cat "$check_directory/first-install.log"
+    exit 1
+fi
+
+echo 'Running runtime tests...'
+"$check_python" -m unittest discover -s runtime -q
+
+echo 'Checking repeat installation...'
+if ! ./install --home "$check_home" --no-activate > "$check_directory/second-install.log"; then
+    cat "$check_directory/second-install.log"
+    exit 1
+fi
+"$check_python" - "$check_directory/second-install.log" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+receipt, _ = json.JSONDecoder().raw_decode(Path(sys.argv[1]).read_text(encoding='utf-8').lstrip())
+if receipt['changed_files']:
+    raise SystemExit('Repeat installation changed managed files: ' + ', '.join(receipt['changed_files']))
+if receipt['maintenance'] != 'installed; activation not requested':
+    raise SystemExit('Isolated installation unexpectedly activated maintenance')
+print('Passed: runtime tests, isolated installation, and zero changes on repeat installation.')
+PY
