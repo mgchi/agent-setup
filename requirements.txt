@@ -1,6 +1,6 @@
 annotated-types==0.8.0
 pydantic==2.14.1
 pydantic-core==2.50.1
-tomlkit==0.15.1
+tomlkit==0.15.2
 typing-extensions==4.16.0
 typing-inspection==0.4.4
