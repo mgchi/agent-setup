@@ -247,7 +247,13 @@ class RefreshTests(unittest.TestCase):
                 stdout.write_text(AgentResult(subtype=subtype, is_error=error).model_dump_json())
                 return Mock(wait=Mock(return_value=rc))
 
-            with self.subTest(rc=rc, subtype=subtype, error=error), patch("refresh_context.Path.home", return_value=fake_home), patch("refresh_context.agents", return_value="{}"), patch("refresh_context.subprocess.Popen", side_effect=launch):
+            with (
+                self.subTest(rc=rc, subtype=subtype, error=error),
+                patch("refresh_context.Path.home", return_value=fake_home),
+                patch("refresh_context.shutil.which", return_value="/fake/bin/claude"),
+                patch("refresh_context.agents", return_value="{}"),
+                patch("refresh_context.subprocess.Popen", side_effect=launch),
+            ):
                 with self.assertRaisesRegex(ValueError, "Refresh agent failed"):
                     run_agent(self.stage, self.tools, "prompt", 10, 30, stdout, stderr)
 
