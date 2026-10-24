@@ -80,7 +80,10 @@ def path_at(value: str, cwd: Path) -> Path:
 def private(path: Path, index: DisclosureIndex) -> bool:
     if linked(path):
         return False
-    return path.resolve().is_relative_to(index.root.resolve())
+    resolved = path.resolve()
+    return (resolved.is_relative_to(index.root.resolve())
+            or resolved in {source.resolve() for source in index.source_files}
+            or any(resolved.is_relative_to(root.resolve()) for root in index.private_roots))
 
 
 def shell_words(command: str) -> list[str]:
@@ -112,7 +115,7 @@ def private_command(command: str, cwd: Path, index: DisclosureIndex) -> bool:
             canonical = Path.home() / '.config/agent-context/settings.json'
             if linked(settings) or settings.resolve() != canonical.resolve():
                 return False
-        if len(words) <= offset or words[offset] not in {'load', 'status', 'collect', 'checkpoint', 'remember', 'cleanup', 'cooldown', 'forget', 'review', 'begin', 'project'}:
+        if len(words) <= offset or words[offset] not in {'load', 'status', 'collect', 'checkpoint', 'remember', 'refresh', 'finish', 'privacy', 'cleanup', 'cooldown', 'forget', 'review', 'begin', 'project'}:
             return False
         if any(word == '--settings' or word.startswith('--settings=') for word in words[offset + 1:]):
             return False

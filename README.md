@@ -120,6 +120,35 @@ Defaults cap an entry packet at 16,000 characters, retain captures for 7 days an
 runs for 14 days, and limit local storage to 256 MiB. The memory database has an
 8 MiB limit. Limits and retention are configurable.
 
+### Existing context and completion checks
+
+A registered project can select existing canonical files without moving them.
+Add `context_sources` (an explicit list of absolute regular file paths) to that
+project in the private settings file. `privacy_roots` lists additional directories
+used only by the disclosure scanner. Neither field uploads files or grants a
+worker access to them. Both reject symlinked paths. The runtime does not rewrite
+external canonical files; use the project's existing reviewed update workflow.
+
+Packets expose full-byte source hashes and explicitly name omitted or shortened
+sources. Read required source material when an excerpt is insufficient. After
+updating an authoritative source, run `agent-context refresh --run <id>` and read
+the current packet before checkpointing. `agent-context finish --run <id>` checks
+the checkpoint against current sources and the local checkout, including dirty
+and untracked content. It does not attest remote synchronization, hosted checks,
+deployment, or resource cleanup. A changed finalized run needs a new checkpoint
+in a new run. Empty checkpoints use `checkpoint --run <id> --none`.
+
+Projects can set `collaboration` to `exchange` to request one reciprocal round
+after successful independent assessments. The lead synthesizes the result.
+Independent advice survives a failed exchange, and configured timeouts still
+apply. The default remains `advisory`.
+
+Hooks cover participating client sessions. They prompt the lead to save explicit
+preferences, accepted decisions and verified lessons; they do not retain every
+action, monitor other apps, or reconstruct old conversations. Verify retained
+entries with `status` and `load`. Canonical source history and optional external
+refresh remain separate from bounded local memory.
+
 ### Privacy boundaries
 
 **Loaded context is sent to the hosted lead model you use.** Local storage does
@@ -187,6 +216,53 @@ installation runs first and is outside that rollback. Backups and manifests live
 under `~/.config/agent-context/backups/`; restore selected files from the relevant
 backup after checking their paths. A full uninstall command is not yet included.
 
+### Replacing an existing workflow
+
+Install and rehearse with `--home` before changing live client settings. Keep old
+jobs stopped during a coordinated cutover, and restart sessions afterward.
+A migration manifest explicitly identifies owned obsolete hooks and managed
+instruction sections; installation alone preserves unrelated hooks.
+
+```json
+{
+  "version": 1,
+  "hook_files": [{
+    "path": "/absolute/private/client-hooks.json",
+    "expected_sha256": "<SHA-256 of the current file bytes>",
+    "commands": ["exact obsolete command"]
+  }],
+  "instruction_files": [{
+    "path": "/absolute/private/AGENTS.md",
+    "expected_sha256": "<SHA-256 of the current file bytes>",
+    "sections": ["old-managed-section"]
+  }],
+  "toml_sections": []
+}
+```
+
+`toml_sections` entries select a `.toml` file with `path`, `expected_sha256`,
+`table` (for example `["prompts"]`), `key` (for example `"general"`), and
+`sections`. Only selected prompt strings are edited. Inspect effective
+repository-specific overrides as well as user settings.
+
+```sh
+agent-context migrate /private/path/migration.json
+agent-context migrate /private/path/migration.json --apply --backup-root /private/path/backups
+agent-context migrate --restore /private/path/backups/migration-ID/migration.json
+```
+
+Preview is the default. Apply removes exact selected entries and creates guarded
+backups; a repeat apply is a no-op. Restore rejects subsequent edits rather than
+overwriting them. Unknown hooks, resource scripts, Git guards, private data and
+schedules are preserved. Inspect and migrate those integrations explicitly.
+This is migration of selected owned configuration, not a full uninstall.
+
+`agent-context privacy --cwd /absolute/path/to/project` checks actual staged Git
+blobs without requiring a client tool hook. It can be chained from an existing
+pre-commit hook; preserve other guards and hook-manager configuration. Review
+public prose and screenshots separately because copied-text checks cannot detect
+every disclosure.
+
 ## Contributing
 
 Start with [CONTRIBUTING.md](CONTRIBUTING.md). Small fixes, reproducible bug
@@ -206,8 +282,8 @@ Report reproducible bugs through [Issues](https://github.com/mgchi/agent-setup/i
 
 ## Direction
 
-The next priorities are documented migration and uninstall flows, broader client
-and platform verification, and better visibility into retained context and
+The next priorities are full uninstall support, broader client and platform
+verification, and better visibility into retained context and
 adviser outcomes. These are areas for contribution, not commitments to a
 delivery date.
 

@@ -26,7 +26,8 @@ from context_store import (
 from refresh_context import prune_logs
 from team_runtime import Outcome, Provider, invoke
 from disclosure import DisclosureError, DisclosureIndex, RawScanner, build_index, regular
-from tool_privacy import denial, guard
+from tool_privacy import denial, guard, staged
+import migrate_local
 
 SETTINGS_PATH = Path.home() / ".config/agent-context/settings.json"
 SCRIPT = Path(__file__).resolve()
@@ -50,6 +51,8 @@ class Run(BaseModel):
     prompt_hash: str
     scope: Scope
     providers: list[Provider]
+    collaboration: Literal["advisory", "exchange"] = "advisory"
+    source_state: dict[str, str] = Field(default_factory=dict)
     created: float = Field(default_factory=time.time)
 
 
@@ -67,6 +70,8 @@ class PhaseResult(BaseModel):
     status: Literal["pending", "complete"]
     outcomes: list[Outcome] = Field(default_factory=list)
     providers: list[str] = Field(default_factory=list)
+    exchange_outcomes: list[Outcome] = Field(default_factory=list)
+    exchange_providers: list[str] = Field(default_factory=list)
     created: float = Field(default_factory=time.time)
     started: float = 0
     deadline: float = 0
@@ -115,9 +120,9 @@ def add_project(settings_path: Path, slug: str, path: Path) -> Project:
         settings = load_settings(settings_path)
         current = settings.project(slug)
         if current:
-            registration = Project(slug=slug, roots=[*current.roots, *registration.roots],
-                                   common_dirs=[*current.common_dirs, *registration.common_dirs],
-                                   advisers=current.advisers)
+            registration = Project.model_validate({**current.model_dump(),
+                "roots": [*current.roots, *registration.roots],
+                "common_dirs": [*current.common_dirs, *registration.common_dirs]})
         projects = [project for project in settings.projects if project.slug != slug]
         updated = Settings.model_validate({**settings.model_dump(), 'projects': [*projects, registration]})
         root = settings.context_root / 'workspaces' / slug
@@ -138,6 +143,9 @@ class CheckpointResult(BaseModel):
     run_id: str
     memory_keys: list[str]
     note: str
+    source_state: dict[str, str] = Field(default_factory=dict)
+    revision: str = ""
+    request_sha256: str = ""
     completed: float = Field(default_factory=time.time)
 
 
@@ -154,7 +162,9 @@ class HookInput(BaseModel):
 
 
 def disclosure_index(store: Store) -> DisclosureIndex:
-    return build_index(store.root, (item.text + "\n" + item.evidence for item in store.disclosure_memories()))
+    return build_index(store.root, (item.text + "\n" + item.evidence for item in store.disclosure_memories()),
+        source_files=[path for project in store.settings.projects for path in project.context_sources],
+        private_roots=[path for project in store.settings.projects for path in project.privacy_roots])
 
 
 def complete_text(path: Path) -> str:
@@ -216,9 +226,10 @@ def spawn_worker(settings_path: Path, run_id: str, phase: Phase, signature: str)
 
 
 def new_result(store: Store, run: Run, phase: Phase, signature: str) -> PhaseResult:
+    rounds = 2 if phase == "assessment" and run.collaboration == "exchange" else 1
     return PhaseResult(run_id=run.run_id, phase=phase, signature=signature,
         status="pending" if run.providers else "complete", providers=[p.name for p in run.providers],
-        deadline=time.time() + store.settings.provider_wait + store.settings.call_timeout + 30,
+        deadline=time.time() + rounds * (store.settings.provider_wait + store.settings.call_timeout) + 30,
         finished=0 if run.providers else time.time())
 
 
@@ -245,7 +256,9 @@ def begin(store: Store, settings_path: Path, cwd: Path, prompt: str, *,
         directory.mkdir(parents=True, mode=0o700)
         providers = [] if orchestration_excluded(store.settings, cwd) else select_providers(store.settings, packet.scope, prompt)
         run = Run(run_id=run_id, cwd=cwd.resolve(), session_key=key, turn=turn,
-                  prompt_hash=prompt_hash, scope=packet.scope, providers=providers)
+                  prompt_hash=prompt_hash, scope=packet.scope, providers=providers,
+                  collaboration=store.settings.project(packet.scope).collaboration if store.settings.project(packet.scope) else "advisory",
+                  source_state=packet_source_state(store, packet))
         save_model(directory / "run.json", run)
         save_model(directory / "packet.json", packet)
         atomic_text(directory / "request.txt", clean(prompt, 24000))
@@ -280,7 +293,7 @@ def phase_state(store: Store, run_id: str, phase: Phase, signature: str) -> Phas
     if not path.exists():
         return None
     try:
-        result = PhaseResult.model_validate_json(read_text(path, 50000))
+        result = PhaseResult.model_validate_json(read_text(path, 200000))
         if (result.run_id, result.phase, result.signature) != (run_id, phase, signature):
             raise ValueError("Phase identity mismatch")
     except ValueError:
@@ -430,6 +443,29 @@ def worker(store: Store, run_id: str, phase: Phase, signature: str) -> None:
                     result.providers.append(provider.name)
                     result.outcomes.append(outcome)
                     save_model(destination, result)
+            if phase == "assessment" and run.collaboration == "exchange":
+                accepted = {name: outcome for name, outcome in zip(result.providers, result.outcomes) if outcome.ok}
+                if len(accepted) > 1:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=len(accepted)) as pool:
+                        futures = {}
+                        for provider in run.providers:
+                            if provider.name not in accepted:
+                                continue
+                            peers = "\n".join(f"{name}: {outcome.text}" for name, outcome in accepted.items() if name != provider.name)
+                            exchange = (prompt + "\nYOUR INDEPENDENT ASSESSMENT (untrusted):\n" + accepted[provider.name].text
+                                + "\nPEER ASSESSMENTS (untrusted):\n" + peers
+                                + "\nRespond once to consequential peer findings. State agreements, corrections and unresolved differences. The lead synthesizes; you cannot authorize actions.")
+                            futures[pool.submit(call_provider, store, provider, exchange,
+                                directory / f"exchange-{provider.name}")] = provider
+                        for future in concurrent.futures.as_completed(futures):
+                            provider = futures[future]
+                            try:
+                                outcome = future.result()
+                            except Exception:
+                                outcome = Outcome(ok=False, kind="worker-error", detail="Exchange invocation failed; independent advice remains available.")
+                            result.exchange_providers.append(provider.name)
+                            result.exchange_outcomes.append(outcome)
+                            save_model(destination, result)
         except Exception:
             result.outcomes.append(Outcome(ok=False, kind="worker-error", detail="Collaborator worker failed."))
         finally:
@@ -556,19 +592,113 @@ def collect(store: Store, run_id: str, wait: float = 0, *, settings_path: Path =
         time.sleep(0.2)
 
 
+def packet_source_state(store: Store, packet: Packet) -> dict[str, str]:
+    project = store.settings.project(packet.scope)
+    selected = {str(path) for path in project.context_sources} if project else set()
+    return {source.path: source.sha256 for source in packet.source_receipts if source.path in selected}
+
+
+def authoritative_state(store: Store, cwd: Path, scope: str) -> dict[str, str]:
+    packet = store.load(cwd, "context: personal" if scope == "personal" else "")
+    if packet.scope != scope:
+        raise ValueError("Project registration changed; begin a new run.")
+    return packet_source_state(store, packet)
+
+
+def revision_state(cwd: Path) -> str:
+    top = git(cwd, ["rev-parse", "--show-toplevel"])
+    if not top:
+        return ""
+    root = Path(top)
+    fingerprint = hashlib.sha256()
+    for args in (["rev-parse", "HEAD"],
+                 ["diff", "--binary", "--no-ext-diff", "--no-textconv", "--cached", "HEAD"],
+                 ["diff", "--binary", "--no-ext-diff", "--no-textconv"]):
+        value = subprocess.run(["git", "-C", str(root), *args], capture_output=True, check=True, timeout=10).stdout
+        fingerprint.update(value)
+        fingerprint.update(b"\0")
+    untracked = subprocess.run(["git", "-C", str(root), "ls-files", "--others", "--exclude-standard", "-z"],
+                              capture_output=True, check=True, timeout=10).stdout
+    for raw_name in filter(None, untracked.split(b"\0")):
+        name = os.fsdecode(raw_name)
+        if sensitive_path(name):
+            raise ValueError("Ignore credential paths before checkpointing.")
+        path = root / name
+        regular(path)
+        fingerprint.update(raw_name + b"\0")
+        with path.open("rb") as source:
+            while chunk := source.read(65536):
+                fingerprint.update(chunk)
+        fingerprint.update(b"\0")
+    return fingerprint.hexdigest()
+
+
+def refresh(store: Store, run_id: str, *, settings_path: Path = SETTINGS_PATH) -> Receipt:
+    directory = run_path(store, run_id)
+    with lock(directory / "checkpoint.lock"):
+        run = read_run(store, run_id)
+        packet = store.load(run.cwd, "context: personal" if run.scope == "personal" else "")
+        if packet.scope != run.scope:
+            raise ValueError("Project registration changed; begin a new run.")
+        run.source_state = packet_source_state(store, packet)
+        save_model(directory / "packet.json", packet)
+        save_model(directory / "run.json", run)
+    return receipt(store, run_id, packet=packet, settings_path=settings_path)
+
+
 def checkpoint(store: Store, run_id: str, request: CheckpointInput) -> CheckpointResult:
     directory = run_path(store, run_id)
-    read_run(store, run_id)
-    memories = [Memory(key=item.key, kind=item.kind, scope=item.scope, text=item.text,
-                       evidence=item.evidence, source=item.source or f"session:{run_id}", run_id=run_id)
-                for item in request.memories]
-    store.remember_many(memories)
-    result = CheckpointResult(run_id=run_id, memory_keys=[item.key for item in memories], note=clean(request.note, 1000))
-    with lock(store.local / "cleanup.lock"):
+    with lock(store.local / "cleanup.lock"), lock(directory / "checkpoint.lock"):
+        run = read_run(store, run_id)
+        sources = authoritative_state(store, run.cwd, run.scope)
+        if sources != run.source_state:
+            raise ValueError("Context sources changed; refresh and read the current packet before checkpointing.")
+        memories = [Memory(key=item.key, kind=item.kind, scope=item.scope, text=item.text,
+                           evidence=item.evidence, source=item.source or f"session:{run_id}", run_id=run_id)
+                    for item in request.memories]
+        revision = revision_state(run.cwd)
+        result = CheckpointResult(run_id=run_id, memory_keys=[item.key for item in memories],
+            note=clean(request.note, 1000), source_state=sources, revision=revision,
+            request_sha256=digest(request.model_dump_json()))
+        saved_path = directory / "checkpoint.json"
+        if saved_path.exists():
+            saved = CheckpointResult.model_validate_json(complete_text(saved_path))
+            if saved.model_dump(exclude={"completed"}) != result.model_dump(exclude={"completed"}):
+                raise ValueError("Run already has a different checkpoint; begin a new run.")
+            return saved
+        pending_path = directory / "checkpoint-request.json"
+        if pending_path.exists():
+            pending = CheckpointResult.model_validate_json(complete_text(pending_path))
+            if pending.model_dump(exclude={"completed"}) != result.model_dump(exclude={"completed"}):
+                raise ValueError("Run already has a different checkpoint request; retry the original request or begin a new run.")
+            result = pending
+        else:
+            for memory in memories:
+                store.validate_memory(memory)
+            save_model(pending_path, result)
+        retained = {(memory.scope, memory.key): memory for memory in store.memories(run.scope)}
+        replayed = all((saved := retained.get((memory.scope, memory.key))) is not None
+                       and saved.model_dump(exclude={"updated", "expires"}) == memory.model_dump(exclude={"updated", "expires"})
+                       for memory in memories)
+        if not replayed:
+            store.remember_many(memories)
+        else:
+            store.flush_outbox()
         if directory.exists():
             save_model(directory / "checkpoint.json", result)
     store.flush_outbox()
     return result
+
+
+def finish(store: Store, run_id: str) -> dict[str, object]:
+    directory = run_path(store, run_id)
+    with lock(directory / "checkpoint.lock"):
+        run = read_run(store, run_id)
+        saved = CheckpointResult.model_validate_json(complete_text(directory / "checkpoint.json"))
+        if saved.source_state != authoritative_state(store, run.cwd, run.scope) or saved.revision != revision_state(run.cwd):
+            raise ValueError("Context or checkout changed after checkpoint; begin and checkpoint a current run.")
+    return {"done": True, "run_id": run_id, "revision": saved.revision,
+            "unknowns": ["remote synchronization", "hosted checks", "merge or deployment", "resource cleanup"]}
 
 
 def context_message(result: Receipt) -> str:
@@ -643,9 +773,14 @@ def parser() -> argparse.ArgumentParser:
     add.add_argument('slug')
     add.add_argument('path', type=Path)
     project_commands.add_parser('list')
-    for name in ("load", "status", "cleanup", "begin", "collect", "review", "checkpoint", "remember", "hook", "worker", "cooldown", "forget"):
+    migration = commands.add_parser('migrate')
+    migration.add_argument('manifest', type=Path, nargs='?')
+    migration.add_argument('--apply', action='store_true')
+    migration.add_argument('--backup-root', type=Path)
+    migration.add_argument('--restore', type=Path)
+    for name in ("load", "status", "cleanup", "begin", "collect", "review", "checkpoint", "remember", "refresh", "finish", "privacy", "hook", "worker", "cooldown", "forget"):
         command = commands.add_parser(name)
-        if name in {"load", "status", "begin"}:
+        if name in {"load", "status", "begin", "privacy"}:
             command.add_argument("--cwd", type=Path, default=Path.cwd())
         if name in {"load", "begin"}:
             command.add_argument("--prompt", default="")
@@ -655,7 +790,7 @@ def parser() -> argparse.ArgumentParser:
             command.add_argument("--turn", default="")
         if name in {"begin", "hook"}:
             command.add_argument("--client", choices=["manual", "claude", "codex"], default="manual")
-        if name in {"collect", "review", "checkpoint", "remember", "worker"}:
+        if name in {"collect", "review", "checkpoint", "remember", "refresh", "finish", "worker"}:
             command.add_argument("--run", required=True)
         if name in {"collect", "review"}:
             command.add_argument("--wait", type=float, default=0)
@@ -682,6 +817,21 @@ def parser() -> argparse.ArgumentParser:
 def main() -> int:
     options = parser().parse_args()
     try:
+        if options.command == 'migrate':
+            if options.restore:
+                if options.manifest or options.apply or options.backup_root:
+                    raise ValueError('Restore cannot be combined with migration options.')
+                migration_result = migrate_local.restore(options.restore)
+            elif not options.manifest:
+                raise ValueError('Provide an explicit migration manifest.')
+            elif options.apply:
+                if not options.backup_root:
+                    raise ValueError('Provide a private backup directory.')
+                migration_result = migrate_local.apply(options.manifest, options.backup_root)
+            else:
+                migration_result = migrate_local.plan(options.manifest)
+            print(json.dumps(migration_result, indent=2))
+            return 0
         if options.command == 'project':
             result = (add_project(options.settings, options.slug, options.path)
                       if options.project_command == 'add'
@@ -712,6 +862,13 @@ def main() -> int:
         elif options.command in {"checkpoint", "remember"}:
             request = CheckpointInput.model_validate_json(complete_text(options.file)) if options.file else CheckpointInput()
             output = checkpoint(store, options.run, request)
+        elif options.command == "refresh":
+            output = refresh(store, options.run, settings_path=options.settings)
+        elif options.command == "finish":
+            output = json.dumps(finish(store, options.run), indent=2)
+        elif options.command == "privacy":
+            staged(disclosure_index(store), options.cwd)
+            output = "Staged disclosure check passed."
         elif options.command == "cleanup":
             store.flush_outbox()
             output = store.prune()
