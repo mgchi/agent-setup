@@ -226,9 +226,10 @@ def build_plan(home: Path) -> InstallPlan:
     prompts['general'] = managed_section(original_prompt, 'agent-context-workflow', template('conductor-prompt.txt', home, context_root))
     files.append(FileWrite(path=conductor_path, text=tomlkit.dumps(conductor)))
 
-    global_path = home / '.agents/AGENTS.md'
-    global_text = managed_section(existing_text(global_path), 'agent-context-workflow', template('global-instructions.txt', home, context_root))
-    files.append(FileWrite(path=global_path, text=global_text))
+    for relative in ('.agents/AGENTS.md', '.codex/AGENTS.md', '.claude/CLAUDE.md'):
+        global_path = home / relative
+        global_text = managed_section(existing_text(global_path), 'agent-context-workflow', template('global-instructions.txt', home, context_root))
+        files.append(FileWrite(path=global_path, text=global_text))
     skill_path = home / '.claude/skills/context-workflow/SKILL.md'
     files.append(FileWrite(path=skill_path, text=template('workflow-skill.md', home, context_root)))
     project_path = home / '.claude/skills/project-context/SKILL.md'

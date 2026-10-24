@@ -1,5 +1,6 @@
 """Bounded private context, sourced memory, and transactional local state."""
 
+import codecs
 import contextlib
 import fcntl
 import hashlib
@@ -7,6 +8,7 @@ import os
 import re
 import shutil
 import sqlite3
+import stat
 import subprocess
 import tempfile
 import time
@@ -26,7 +28,10 @@ class Project(BaseModel):
     slug: Scope
     roots: list[Path] = Field(default_factory=list)
     common_dirs: list[Path] = Field(default_factory=list)
+    context_sources: list[Path] = Field(default_factory=list)
+    privacy_roots: list[Path] = Field(default_factory=list)
     advisers: bool = True
+    collaboration: Literal["advisory", "exchange"] = "advisory"
 
     @field_validator("slug")
     @classmethod
@@ -49,6 +54,19 @@ class Project(BaseModel):
             if path not in result:
                 result.append(path)
         return result
+
+    @field_validator("context_sources")
+    @classmethod
+    def source_paths(cls, values: list[Path]) -> list[Path]:
+        return list(dict.fromkeys(context_source_path(value) for value in values))
+
+    @field_validator("privacy_roots")
+    @classmethod
+    def private_paths(cls, values: list[Path]) -> list[Path]:
+        paths = cls.project_paths(values)
+        if any(not path.is_dir() or any(char in str(path) for char in "*?[") for path in paths):
+            raise ValueError("Privacy roots must be explicit existing directories.")
+        return paths
 
 
 class RefreshSettings(BaseModel):
@@ -137,11 +155,21 @@ class Memory(BaseModel):
     expires: float = 0
 
 
+class SourceReceipt(BaseModel):
+    path: str
+    sha256: str
+    size_bytes: int
+    truncated: bool = False
+    omitted: bool = False
+
+
 class Packet(BaseModel):
     scope: Scope
     text: str
     sources: list[str]
     truncated: bool = False
+    source_receipts: list[SourceReceipt] = Field(default_factory=list)
+    omitted_sources: list[str] = Field(default_factory=list)
 
 
 class Capture(BaseModel):
@@ -223,6 +251,16 @@ def linked_path(path: Path) -> bool:
                for part in (path, *path.parents))
 
 
+def context_source_path(value: Path) -> Path:
+    path = value.expanduser()
+    if (not path.is_absolute() or linked_path(path) or sensitive_path(str(path))
+            or any(char in str(path) for char in "*?[")):
+        raise ValueError(f"Context sources must be explicit absolute files without symlinks or secret paths: {path}")
+    if not path.is_file():
+        raise ValueError(f"Context source must be an existing regular file: {path}")
+    return path.resolve()
+
+
 def file_size(path: Path) -> int:
     try:
         return path.stat().st_size
@@ -280,6 +318,43 @@ def read_text(path: Path, limit: int = 40000) -> str:
             return clean(handle.read(limit + 1), limit)
     except (OSError, UnicodeError):
         return ""
+
+
+def read_packet_source(path: Path, limit: int, *, required: bool = False) -> tuple[str, SourceReceipt] | None:
+    """Fingerprint one selected source while retaining only a bounded UTF-8 prefix."""
+    try:
+        if required:
+            path = context_source_path(path)
+        elif linked_path(path) or sensitive_path(str(path)) or not path.is_file():
+            return None
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as handle:
+            before = os.fstat(handle.fileno())
+            if linked_path(path) or not stat.S_ISREG(before.st_mode):
+                raise ValueError(f"Context source must remain a regular file without symlinks: {path}")
+            fingerprint = hashlib.sha256()
+            decoder = codecs.getincrementaldecoder("utf-8")()
+            prefix = ""
+            size = 0
+            while size < before.st_size:
+                chunk = handle.read(min(65536, before.st_size - size))
+                if not chunk:
+                    raise ValueError(f"Context source changed while reading: {path}")
+                fingerprint.update(chunk)
+                size += len(chunk)
+                decoded = decoder.decode(chunk)
+                prefix += decoded[:max(0, limit + 1 - len(prefix))]
+            prefix += decoder.decode(b"", final=True)[:max(0, limit + 1 - len(prefix))]
+            after = os.fstat(handle.fileno())
+            if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+                raise ValueError(f"Context source changed while reading: {path}")
+        body = clean(prefix, limit + 1)
+        return body[:limit], SourceReceipt(path=str(path), sha256=fingerprint.hexdigest(),
+            size_bytes=size, truncated=len(prefix) > limit or len(body) > limit)
+    except (OSError, UnicodeError, ValueError) as error:
+        if required:
+            raise ValueError(f"Cannot read configured context source {path}: {error}") from error
+        return None
 
 
 def git(cwd: Path, arguments: list[str], timeout: int = 5) -> str:
@@ -598,7 +673,7 @@ class Store:
             connection.execute("DELETE FROM capture WHERE created<?", (now - self.settings.capture_days * 86400,))
             connection.execute("DELETE FROM session WHERE updated<?", (now - self.settings.run_days * 86400,))
             connection.execute("DELETE FROM cooldown WHERE until<=?", (now,))
-        with sqlite3.connect(self.db, timeout=5) as connection:
+        with contextlib.closing(sqlite3.connect(self.db, timeout=5)) as connection:
             connection.execute("VACUUM")
         return self.prune_runs()
 
@@ -660,50 +735,34 @@ class Store:
             return self._load(scope, query)
 
     def _load(self, scope: Scope, query: str) -> Packet:
-        sections: list[str] = []
-        sources: list[str] = []
-        remaining_packet = self.settings.packet_chars
-        truncated = False
         query_terms = terms(query)
-        ranked = sorted(self.memories(scope), key=lambda item: (len(terms(item.text + " " + item.key) & query_terms),
-                        item.key in self.settings.core_memory_keys, item.updated), reverse=True)
-        memory_lines: list[str] = []
-        heading = "Saved context (current instructions take precedence):\n"
-        remaining = min(3000, remaining_packet) - len(heading)
-        for item in ranked:
-            line = f"- [{item.key}; {item.source}] {item.text}"
-            if len(line) + 1 > remaining:
-                truncated = True
-                continue
-            memory_lines.append(line)
-            remaining -= len(line) + 1
-            if len(memory_lines) == 12:
-                break
-        if memory_lines:
-            sections.append(heading + "\n".join(memory_lines))
-            remaining_packet -= len(sections[-1]) + 2
-        background: list[tuple[Path, str]] = []
+        background: dict[Path, tuple[str, SourceReceipt]] = {}
         path = self.local / "personal.md"
-        body = read_text(path, 5000)
-        if body:
-            background.append((path, body))
+        source = read_packet_source(path, 5000)
+        if source is not None:
+            background[path] = source
         project_root = self.root / "workspaces" / scope
         complete_digest = not (project_root / "local/refresh/pending.json").exists()
+        warning = ""
         if scope != "personal":
             names = ["context.md", "playbook.md"]
             if complete_digest:
                 names.extend(["brief.md", "decisions.md", "inbox.md"])
             else:
                 warning = "Project digest publication was interrupted. Verify live sources until refresh recovery completes."
-                sections.append(warning)
-                remaining_packet -= len(warning) + 2
             for name in names:
                 path = project_root / name
-                body = read_text(path, 4200 if name == "brief.md" else 2200)
-                if body:
-                    background.append((path, body))
+                source = read_packet_source(path, 4200 if name == "brief.md" else 2200)
+                if source is not None:
+                    background[path] = source
+            project = self.settings.project(scope)
+            if project is not None:
+                for path in project.context_sources:
+                    source = read_packet_source(path, self.settings.packet_chars, required=True)
+                    if source is not None:
+                        background[path] = source
         if scope != "personal" and query_terms and complete_digest:
-            candidates: list[tuple[int, Path, str]] = []
+            candidates: list[tuple[int, Path]] = []
             paths = [project_root / "people.md", project_root / "decisions.md"]
             for directory in ("projects", "customers", "meetings"):
                 paths.extend(sorted((project_root / directory).glob("*.md"), reverse=True)[:300])
@@ -711,30 +770,76 @@ class Store:
                 body = read_text(path, 24000)
                 score = len(terms(body) & query_terms) + 3 * len(terms(path.stem) & query_terms)
                 if score >= 2:
-                    candidates.append((score, path, body))
-            for _, path, body in sorted(candidates, key=lambda value: (value[0], value[1].name), reverse=True)[:2]:
+                    candidates.append((score, path))
+            for _, path in sorted(candidates, key=lambda value: (value[0], value[1].name), reverse=True)[:2]:
+                source = read_packet_source(path, 24000)
+                if source is None:
+                    continue
+                body, receipt = source
                 lines = body.splitlines()
                 selected = set(range(min(3, len(lines))))
                 for index, line in enumerate(lines):
                     if terms(line) & query_terms:
                         selected.update(range(max(0, index - 1), min(len(lines), index + 2)))
-                excerpt = "\n".join(f"{index + 1}: {lines[index]}" for index in sorted(selected))[:1800]
-                background.append((path, excerpt))
-        for path, body in background:
-            label = f"Source: {path} (file modified {time.strftime('%Y-%m-%d', time.localtime(modified(path)))})\n"
-            available = remaining_packet - len(label)
-            if available < 80:
+                excerpt = "\n".join(f"{index + 1}: {lines[index]}" for index in sorted(selected))
+                receipt.truncated = receipt.truncated or len(selected) < len(lines) or len(excerpt) > 1800
+                if path in background:
+                    previous, previous_receipt = background[path]
+                    receipt.truncated = receipt.truncated or previous_receipt.truncated
+                    background[path] = (previous + "\n\nRelevant lines:\n" + excerpt[:1800], receipt)
+                else:
+                    background[path] = (excerpt[:1800], receipt)
+
+        notices = {path: f"[Source omitted from packet; read full file: {path}]" for path in background}
+        minimum_sections = [*([warning] if warning else []), *notices.values()]
+        minimum_size = len("\n\n".join(minimum_sections))
+        if minimum_size > self.settings.packet_chars:
+            raise ValueError("Packet limit cannot include every source location. Increase packet_chars or reduce context sources.")
+        sections: list[str] = []
+        sources: list[str] = []
+        receipts: list[SourceReceipt] = []
+        omitted: list[str] = []
+        truncated = False
+        ranked = sorted(self.memories(scope), key=lambda item: (len(terms(item.text + " " + item.key) & query_terms),
+                        item.key in self.settings.core_memory_keys, item.updated), reverse=True)
+        memory_lines: list[str] = []
+        heading = "Saved context (current instructions take precedence):\n"
+        remaining = min(3000, self.settings.packet_chars - minimum_size - (2 if minimum_size else 0)) - len(heading)
+        for item in ranked:
+            line = f"- [{item.key}; {item.source}] {item.text}"
+            if len(memory_lines) == 12 or len(line) + 1 > remaining:
                 truncated = True
                 continue
-            if len(body) > available:
-                truncated = True
-                marker = "\n[Source excerpt shortened; read the file for more.]"
-                body = body[:max(0, available - len(marker))].rsplit("\n", 1)[0] + marker
-            sections.append(label + body)
-            sources.append(str(path))
-            remaining_packet -= len(sections[-1]) + 2
+            memory_lines.append(line)
+            remaining -= len(line) + 1
+        if memory_lines:
+            sections.append(heading + "\n".join(memory_lines))
+        if warning:
+            sections.append(warning)
+        reserved = sum(len(notice) + 2 for notice in notices.values())
+        for path, (body, receipt) in background.items():
+            reserved -= len(notices[path]) + 2
+            available = self.settings.packet_chars - len("\n\n".join(sections)) - (2 if sections else 0) - reserved
+            label = f"Source: {path} (file modified {time.strftime('%Y-%m-%d', time.localtime(modified(path)))})\n"
+            marker = f"\n[Source truncated; read full file: {path}]"
+            section = label + body + (marker if receipt.truncated else "")
+            if len(section) > available:
+                receipt.truncated = True
+                body_limit = available - len(label) - len(marker)
+                if body_limit >= 80:
+                    section = label + body[:body_limit] + marker
+                else:
+                    section = notices[path]
+                    receipt.omitted = True
+                    omitted.append(str(path))
+            sections.append(section)
+            if not receipt.omitted:
+                sources.append(str(path))
+            receipts.append(receipt)
+            truncated = truncated or receipt.truncated
         combined = "\n\n".join(sections)
-        return Packet(scope=scope, text=combined, sources=sources, truncated=truncated)
+        return Packet(scope=scope, text=combined, sources=sources, truncated=truncated,
+                      source_receipts=receipts, omitted_sources=omitted)
 
 
 def load_settings(path: Path) -> Settings:

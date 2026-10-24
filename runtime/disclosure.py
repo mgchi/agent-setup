@@ -66,6 +66,8 @@ def secret_matches(text: str) -> set[tuple[str, str]]:
 
 class DisclosureIndex(BaseModel):
     root: Path
+    private_roots: list[Path] = Field(default_factory=list)
+    source_files: list[Path] = Field(default_factory=list)
     words: set[str] = Field(default_factory=set)
     files: set[str] = Field(default_factory=set)
 
@@ -152,10 +154,11 @@ class RawScanner:
                     raise DisclosureError('private-file')
 
 
-def build_index(root: Path, memories: Iterable[str] = ()) -> DisclosureIndex:
+def build_index(root: Path, memories: Iterable[str] = (), *, source_files: Iterable[Path] = (),
+                private_roots: Iterable[Path] = ()) -> DisclosureIndex:
     if linked(root):
         raise DisclosureError('linked-context')
-    index = DisclosureIndex(root=root.expanduser().resolve())
+    index = DisclosureIndex(root=root.expanduser().resolve(), source_files=list(source_files), private_roots=list(private_roots))
     workspaces = root / 'workspaces'
     if linked(workspaces):
         raise DisclosureError('linked-context')
@@ -166,6 +169,19 @@ def build_index(root: Path, memories: Iterable[str] = ()) -> DisclosureIndex:
         if project.is_dir():
             roots.append(project)
     files: set[Path] = set()
+    for source in index.source_files:
+        regular(source)
+        files.add(source)
+    for private_root in index.private_roots:
+        if linked(private_root) or not private_root.is_dir():
+            raise DisclosureError('invalid-private-root')
+        for path in private_root.rglob('*'):
+            if '.git' in path.relative_to(private_root).parts:
+                continue
+            if linked(path):
+                raise DisclosureError('linked-private-source')
+            if path.is_file():
+                files.add(path)
     for context in roots:
         files.update(context.glob('*.md'))
         for folder in ('projects', 'customers', 'meetings', 'local'):

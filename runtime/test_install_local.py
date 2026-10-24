@@ -34,6 +34,8 @@ class InstallTests(unittest.TestCase):
         atomic_text(self.hooks, json.dumps({'hooks': {'Stop': [{'hooks': [{'type': 'command', 'command': 'existing-codex-stop'}]}]}}))
         atomic_text(self.conductor, '[models.claude_code]\ndefault_model = "native-lead"\nreview_model = "native-review"\n[models.codex]\ndefault_thinking_level = "high"\n[prompts]\ngeneral = "Keep my existing instructions."\n')
         atomic_text(self.global_file, '# Personal rules\nKeep my existing rules.\n')
+        for relative in ('.codex/AGENTS.md', '.claude/CLAUDE.md'):
+            atomic_text(self.home / relative, 'Keep native client instructions.\n')
         self.prompt = 'I prefer concise responses.'
         self.seed = PreferenceSeed(prompt=self.prompt, memories=[self.memory()])
         self.seed_path = self.home / 'seed.json'
@@ -65,6 +67,10 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(conductor['models']['codex']['default_thinking_level'], 'high')
         self.assertIn('Keep my existing instructions.', conductor['prompts']['general'])
         self.assertIn('Keep my existing rules.', self.global_file.read_text())
+        for relative in ('.codex/AGENTS.md', '.claude/CLAUDE.md'):
+            instructions = (self.home / relative).read_text()
+            self.assertIn('Keep native client instructions.', instructions)
+            self.assertEqual(instructions.count('<!-- agent-context-workflow:start -->'), 1)
         hooks = json.loads(self.hooks.read_text())['hooks']
         self.assertEqual(hooks['Stop'][0]['hooks'][0]['command'], 'existing-codex-stop')
         self.assertEqual(hooks['UserPromptSubmit'][-1]['hooks'][0]['additionalContextLimit'], 5000)
