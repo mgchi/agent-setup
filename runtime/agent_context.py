@@ -165,10 +165,13 @@ class HookInput(BaseModel):
 
 
 def disclosure_index(store: Store) -> DisclosureIndex:
-    return build_index(store.root, (item.text + "\n" + item.evidence for item in store.disclosure_memories()),
+    index = build_index(store.root, (item.text + "\n" + item.evidence for item in store.disclosure_memories()),
         source_files=[path for project in store.settings.projects for path in project.context_sources + project.topic_paths()],
         private_roots=[path for project in store.settings.projects for path in project.privacy_roots],
         context_dirs=[project.context_dir for project in store.settings.projects if project.context_dir])
+    index.private_github_repositories = {str(project.context_dir): project.private_github_repository
+        for project in store.settings.projects if project.context_dir and project.private_github_repository}
+    return index
 
 
 def complete_text(path: Path) -> str:

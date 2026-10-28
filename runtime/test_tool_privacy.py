@@ -11,7 +11,7 @@ from unittest.mock import patch
 from urllib.parse import quote
 
 from disclosure import DisclosureError, build_index
-from tool_privacy import guard, head_matches, staged, staged_commands
+from tool_privacy import guard, head_matches, staged, staged_commands, verified_private_repository
 
 
 class ToolPrivacyTests(unittest.TestCase):
@@ -38,6 +38,50 @@ class ToolPrivacyTests(unittest.TestCase):
         self.git("add", "existing.txt")
         self.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
                  "-c", "core.hooksPath=/dev/null", "commit", "-qm", "Fixture")
+
+    def test_verified_private_repository_allows_context_but_still_rejects_secrets(self) -> None:
+        self.baseline()
+        self.git('remote', 'add', 'origin', 'git@github.com:example/private-notes.git')
+        self.index.private_github_repositories[str(self.repo)] = 'example/private-notes'
+        (self.repo / 'current.md').write_text(self.phrase)
+        self.git('add', 'current.md')
+        real_run = subprocess.run
+
+        def run(argv, **kwargs):
+            if argv[:2] == ['gh', 'api']:
+                return subprocess.CompletedProcess(argv, 0, 'true\n', '')
+            return real_run(argv, **kwargs)
+
+        with patch('tool_privacy.subprocess.run', side_effect=run), patch('tool_privacy.head_matches', side_effect=AssertionError('Private archive must not be scanned as public output')):
+            staged(self.index, self.repo)
+            staged_commands(self.index, self.repo, ['git push -u origin main'])
+            (self.repo / 'current.md').write_text('sk-' + 'a' * 30)
+            self.git('add', 'current.md')
+            with self.assertRaisesRegex(DisclosureError, 'provider-token'):
+                staged(self.index, self.repo)
+
+    def test_private_repository_requires_current_visibility_and_exact_destination(self) -> None:
+        self.baseline()
+        self.git('remote', 'add', 'origin', 'https://github.com/example/private-notes.git')
+        self.index.private_github_repositories[str(self.repo)] = 'example/private-notes'
+        real_run = subprocess.run
+        for code, output in ((0, 'false\n'), (1, ''), (0, 'invalid')):
+            def run(argv, **kwargs):
+                return subprocess.CompletedProcess(argv, code, output, '') if argv[:2] == ['gh', 'api'] else real_run(argv, **kwargs)
+            with self.subTest(output=output), patch('tool_privacy.subprocess.run', side_effect=run):
+                with self.assertRaisesRegex(DisclosureError, 'unverified'):
+                    verified_private_repository(self.index, self.repo)
+        self.git('remote', 'set-url', '--push', 'origin', 'https://github.com/example/public-notes.git')
+        with self.assertRaisesRegex(DisclosureError, 'destination'):
+            verified_private_repository(self.index, self.repo)
+        for command in ('git push https://github.com/example/public-notes.git main', 'git push --repo=elsewhere', 'git push other main'):
+            with self.subTest(command=command), self.assertRaisesRegex(DisclosureError, 'push-arguments'):
+                staged_commands(self.index, self.repo, [command])
+
+    def test_private_repository_does_not_exempt_other_repositories_or_uploads(self) -> None:
+        self.index.private_github_repositories[str(self.context)] = 'example/private-notes'
+        self.assertFalse(verified_private_repository(self.index, self.repo))
+        self.assertIn('private-path-egress', guard(self.index, self.repo, 'upload', {'path': str(self.private_file)}))
 
     def test_relative_spaced_encoded_and_upload_file_arguments(self) -> None:
         outgoing = self.repo / "outgoing note.txt"

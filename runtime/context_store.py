@@ -36,6 +36,7 @@ class Project(BaseModel):
     knowledge_revision: str = ""
     privacy_roots: list[Path] = Field(default_factory=list)
     context_dir: Path | None = None
+    private_github_repository: str = ""
     advisers: bool = True
     collaboration: Literal["advisory", "exchange"] = "advisory"
 
@@ -91,6 +92,8 @@ class Project(BaseModel):
         known = {str(path) for path in self.context_sources + self.topic_paths()}
         if not self.source_max_age_days.keys() <= known:
             raise ValueError("Freshness limits must name a registered context or topic source.")
+        if self.private_github_repository and (not self.context_dir or not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', self.private_github_repository)):
+            raise ValueError("A private Git repository needs an adopted context directory and an owner/repository name.")
         return self
 
     def topic_paths(self) -> list[Path]:
@@ -841,11 +844,17 @@ class Store:
                 if (Path(name).is_absolute() or '..' in Path(name).parts or linked_path(runtime / name)
                         or not (runtime / name).is_file() or digest((runtime / name).read_text()) != expected):
                     drift.append(name)
+            if manifest.get("files"):
+                installed = {str(path.relative_to(runtime)) for path in runtime.glob('*.py') if not path.name.startswith('test_')}
+                installed.update(str(path.relative_to(runtime)) for path in (runtime / 'templates').glob('*') if path.is_file())
+                drift.extend(sorted(installed - manifest['files'].keys()))
         except (OSError, ValueError):
             manifest, drift = {}, []
             packet.warnings.append("Installation provenance is unreadable; reinstall to restore verification.")
         if manifest.get("source_dirty"):
             packet.warnings.append("Runtime was installed from an uncommitted source tree.")
+        if not manifest.get("revision"):
+            packet.warnings.append("Installed source revision is unknown.")
         if drift:
             packet.warnings.append("Installed runtime differs from its installation manifest.")
         return StoreStatus(memory_count=memory_count, capture_count=capture_count, pending_inbox=pending,
@@ -904,7 +913,8 @@ class Store:
                 body = read_text(path, 24000)
                 if re.search(r"(?im)^context-status:\s*(?:historical|superseded|archived)\s*$", body):
                     continue
-                score = len(terms(body) & query_terms) + 3 * len(terms(path.stem) & query_terms)
+                filename_terms = terms(path.stem) | terms(path.stem.replace('-', ' ').replace('_', ' '))
+                score = len(terms(body) & query_terms) + 3 * len(filename_terms & query_terms)
                 if score >= 2:
                     candidates.append((score, path))
             for _, path in sorted(candidates, key=lambda value: (value[0], value[1].name), reverse=True)[:2]:

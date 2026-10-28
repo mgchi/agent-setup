@@ -60,8 +60,12 @@ class ContextTests(unittest.TestCase):
             self.assertEqual(status.modified_runtime_files, [])
             (runtime / "module.py").write_text("changed\n")
             self.assertEqual(self.store.status(self.project).modified_runtime_files, ["module.py"])
+            (runtime / "unexpected.py").write_text("unrecorded module\n")
+            self.assertEqual(self.store.status(self.project).modified_runtime_files, ["module.py", "unexpected.py"])
             manifest.write_text(json.dumps({"files": {"../outside": "hash"}}))
-            self.assertEqual(self.store.status(self.project).modified_runtime_files, ["../outside"])
+            status = self.store.status(self.project)
+            self.assertEqual(status.modified_runtime_files, ["../outside", "module.py", "unexpected.py"])
+            self.assertTrue(any("unknown" in message for message in status.warnings))
             for broken in ("{invalid", "[]", '{"files": []}'):
                 manifest.write_text(broken)
                 self.assertTrue(any("unreadable" in message for message in self.store.status(self.project).warnings))
@@ -256,6 +260,14 @@ class ContextTests(unittest.TestCase):
         linked.symlink_to(first)
         with self.assertRaises(ValueError):
             self.store.load(self.project, "rendering")
+
+    def test_compound_topic_filenames_match_natural_query_words(self) -> None:
+        topics = self.root / "topics"
+        topics.mkdir()
+        (topics / "release-workflow.md").write_text("# Delivery procedure\nVerify the staged artifact.\n")
+        self.store.settings.projects = [Project(slug="example", roots=[self.project], topic_dirs=[topics])]
+        self.assertIn("Verify the staged artifact", self.store.load(self.project, "workflow").text)
+        self.assertNotIn("Verify the staged artifact", self.store.load(self.project, "invoice").text)
 
     def test_large_early_source_reserves_space_for_later_live_brief(self) -> None:
         large = self.root / "state.md"

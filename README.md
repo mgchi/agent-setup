@@ -168,6 +168,14 @@ the runtime never silently rewrites canonical decisions. Reconcile a material
 outcome into its existing topic and current brief, preserve old evidence in Git
 or history, and checkpoint only the supported reusable memory that remains.
 
+An adopted context directory may set `private_github_repository` to its exact
+`owner/repository` destination. Before checking or publishing its staged files,
+the guard verifies the canonical repository root, the sole `origin` remote and
+all resolved push URLs, and confirms private visibility through the authenticated
+`gh` CLI. Only this verified destination permits private context text; credentials
+remain forbidden. Unknown visibility, changed remotes and push URL overrides fail
+closed. This does not relax public-repository or arbitrary-upload checks.
+
 For an explicitly configured instruction-copy workflow, private settings may
 provide `instruction_sources` mapping output Markdown filenames to source files.
 `privacy --instruction-copies <private-local-directory>` exports only that bounded
