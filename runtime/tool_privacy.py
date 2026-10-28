@@ -187,11 +187,11 @@ def references(texts: list[str], cwd: Path) -> set[Path]:
         for candidate in candidates:
             if not candidate or '\x00' in candidate or '://' in candidate or len(candidate) > 4096:
                 continue
-            path = path_at(candidate, cwd)
             try:
+                path = path_at(candidate, cwd)
                 if path.exists() or path.is_symlink():
                     paths.add(path)
-            except OSError:
+            except (OSError, RuntimeError, ValueError):
                 continue
     return paths
 

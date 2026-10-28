@@ -181,6 +181,21 @@ class WorkflowTests(unittest.TestCase):
         checkpoint(self.store, run_id, CheckpointInput())
         self.assertEqual(hook(self.store, self.settings_path, self.event("Stop", last_assistant_message="Answer"), "codex"), "")
 
+    def test_topic_changes_and_new_records_invalidate_checkpoint(self) -> None:
+        topics = self.root / "topics"
+        topics.mkdir()
+        self.store.settings.projects[0].topic_dirs = [topics]
+        record = topics / "design.md"
+        record.write_text("Current design decision.\n")
+        run_id = self.start()
+        record.write_text("Context-Status: historical\nRetired design decision.\n")
+        with self.assertRaisesRegex(ValueError, "sources changed"):
+            checkpoint(self.store, run_id, CheckpointInput())
+        next_run = self.start(turn="new-record")
+        (topics / "operations.md").write_text("Current operations decision.\n")
+        with self.assertRaisesRegex(ValueError, "sources changed"):
+            checkpoint(self.store, next_run, CheckpointInput())
+
     def test_stop_reminder_asks_for_the_complete_answer_again(self) -> None:
         self.start()
         response = hook(self.store, self.settings_path, self.event("Stop", last_assistant_message="Answer"), "codex")

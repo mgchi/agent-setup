@@ -38,6 +38,34 @@ class ContextTests(unittest.TestCase):
         self.store.remember(self.memory(key="duplicate", text="Keep answers brief."))
         self.assertEqual(len(self.store.memories("personal")), 1)
 
+    def test_generated_inbox_cannot_bypass_memory_relevance(self) -> None:
+        self.store.remember(self.memory(key="editor", kind="decision", scope="example",
+            text="Ship the editor this week.", evidence="I decided to ship the editor this week."))
+        inbox = self.store.settings.project_root("example") / "inbox.md"
+        self.assertIn("Ship the editor", inbox.read_text())
+        self.assertNotIn("Ship the editor", self.store.load(self.project, "database backup recovery").text)
+        self.assertIn("Ship the editor", self.store.load(self.project, "editor release").text)
+
+    def test_status_reports_manifest_drift_without_trusting_paths(self) -> None:
+        runtime = self.root / "runtime"
+        runtime.mkdir()
+        (runtime / "module.py").write_text("original\n")
+        manifest = runtime / "installation.json"
+        manifest.write_text(json.dumps({"revision": "abc123", "source_dirty": True,
+            "files": {"module.py": hashlib.sha256(b"original\n").hexdigest()}}))
+        with patch("context_store.__file__", str(runtime / "context_store.py")):
+            status = self.store.status(self.project)
+            self.assertEqual(status.installation_revision, "abc123")
+            self.assertTrue(status.installation_dirty_source)
+            self.assertEqual(status.modified_runtime_files, [])
+            (runtime / "module.py").write_text("changed\n")
+            self.assertEqual(self.store.status(self.project).modified_runtime_files, ["module.py"])
+            manifest.write_text(json.dumps({"files": {"../outside": "hash"}}))
+            self.assertEqual(self.store.status(self.project).modified_runtime_files, ["../outside"])
+            for broken in ("{invalid", "[]", '{"files": []}'):
+                manifest.write_text(broken)
+                self.assertTrue(any("unreadable" in message for message in self.store.status(self.project).warnings))
+
     def test_assistant_and_quoted_content_cannot_supply_user_evidence(self) -> None:
         attacks = ["> I prefer concise responses.", '"I prefer concise responses."',
                    "```\nI prefer concise responses.\n```", "<tool>\nI prefer concise responses.\n</tool>",
@@ -151,6 +179,115 @@ class ContextTests(unittest.TestCase):
         self.store.forget("example", "style")
         self.store.flush_outbox()
         self.assertFalse((self.store.root / "workspaces/example/inbox.md").exists())
+
+    def test_retired_published_decisions_never_reenter_a_packet(self) -> None:
+        evidence = "I decided to ship the editor this week."
+        decision = self.memory(kind="decision", scope="example", evidence=evidence, text="Ship the editor this week.")
+        inbox = self.store.root / "workspaces/example/inbox.md"
+        self.store.remember(decision)
+        inbox.write_text("Owner-authored note.\n" + inbox.read_text())
+        self.store.forget("example", "style")
+        self.assertEqual(self.store.memories("example"), [])
+        self.assertNotIn(decision.text, inbox.read_text())
+        self.assertIn("Owner-authored note.", inbox.read_text())
+        self.assertNotIn(decision.text, self.store.load(self.project).text)
+
+    def test_expired_decision_is_filtered_before_cleanup_and_reconciled_after(self) -> None:
+        decision = self.memory(kind="decision", scope="example", text="Ship the editor this week.",
+            evidence="I decided to ship the editor this week.", expires=time.time() + 60)
+        self.store.remember(decision)
+        with patch("context_store.time.time", return_value=time.time() + 120):
+            self.assertNotIn(decision.text, self.store.load(self.project).text)
+            self.store.prune()
+            self.assertNotIn(decision.text, (self.store.root / "workspaces/example/inbox.md").read_text())
+
+    def test_replacing_and_evicting_decisions_reconciles_the_published_view(self) -> None:
+        decision = self.memory(kind="decision", scope="example", text="Ship the editor this week.",
+            evidence="I decided to ship the editor this week.")
+        self.store.remember(decision)
+        self.store.capture(Capture(run_id="test", prompt="I decided to postpone the editor.", scope="example"))
+        replacement = decision.model_copy(update={"text": "Postpone the editor.", "evidence": "I decided to postpone the editor."})
+        self.store.remember(replacement)
+        packet = self.store.load(self.project)
+        self.assertNotIn(decision.text, packet.text)
+        self.assertIn(replacement.text, packet.text)
+        self.store.settings.max_memory = 1
+        self.store.capture(Capture(run_id="test", prompt="I prefer concise responses.", scope="example"))
+        self.store.remember(self.memory())
+        self.assertNotIn(replacement.text, self.store.load(self.project).text)
+
+    def test_interrupted_inbox_write_cannot_resurrect_a_forgotten_decision(self) -> None:
+        decision = self.memory(kind="decision", scope="example", text="Ship the editor this week.",
+            evidence="I decided to ship the editor this week.")
+        self.store.remember(decision)
+        with patch.object(self.store, "reconcile_inboxes", side_effect=OSError("interrupted")):
+            with self.assertRaises(OSError):
+                self.store.forget("example", "style")
+        packet = self.store.load(self.project)
+        self.assertNotIn(decision.text, packet.text)
+        self.assertFalse(packet.truncated)
+        self.store.prune()
+        self.assertNotIn(decision.text, (self.store.root / "workspaces/example/inbox.md").read_text())
+
+    def test_review_due_decision_is_retained_for_review_but_not_retrieved(self) -> None:
+        decision = self.memory(kind="decision", scope="example", text="Ship the editor this week.",
+            evidence="I decided to ship the editor this week.", review_after=time.time() + 60)
+        self.store.remember(decision)
+        with patch("context_store.time.time", return_value=time.time() + 120):
+            self.assertNotIn(decision.text, self.store.load(self.project).text)
+            self.assertEqual(self.store.status(self.project).review_due_count, 1)
+            self.assertEqual(len(self.store.disclosure_memories()), 1)
+
+    def test_topic_directories_select_relevant_new_records_without_loading_other_topics(self) -> None:
+        topics = self.root / "topics"
+        topics.mkdir()
+        first = topics / "rendering.md"
+        first.write_text("# Rendering\nUse an amber renderer for vector geometry.\n")
+        self.store.settings.projects = [Project(slug="example", roots=[self.project], topic_dirs=[topics])]
+        second = topics / "billing.md"
+        second.write_text("# Billing\nInvoice settlement uses monthly billing cycles.\n")
+        packet = self.store.load(self.project, "vector rendering")
+        self.assertIn("amber renderer", packet.text)
+        self.assertNotIn("Invoice settlement", packet.text)
+        self.assertEqual(packet.source_receipts[0].role, "topic")
+        self.assertIn("Invoice settlement", self.store.load(self.project, "invoice billing").text)
+        self.assertNotIn("amber renderer", self.store.load(self.project, "context: personal").text)
+        linked = topics / "linked.md"
+        linked.symlink_to(first)
+        with self.assertRaises(ValueError):
+            self.store.load(self.project, "rendering")
+
+    def test_large_early_source_reserves_space_for_later_live_brief(self) -> None:
+        large = self.root / "state.md"
+        live = self.root / "live.md"
+        large.write_text("Old supporting detail.\n" * 2000)
+        live.write_text("Current actionable brief.\n")
+        self.store.settings.projects = [Project(slug="example", roots=[self.project], context_sources=[large, live])]
+        packet = self.store.load(self.project)
+        self.assertIn("Current actionable brief.", packet.text)
+        self.assertFalse(packet.source_receipts[-1].omitted)
+        self.assertLessEqual(len(packet.text), self.store.settings.packet_chars)
+
+    def test_source_freshness_and_revision_drift_are_visible(self) -> None:
+        source = self.root / "status.md"
+        source.write_text("Last verified release.\n")
+        old = time.time() - 3 * 86400
+        os.utime(source, (old, old))
+        self.store.settings.projects = [Project(slug="example", roots=[self.project], context_sources=[source],
+            source_max_age_days={str(source): 1}, knowledge_revision="previous-revision")]
+        packet = self.store.load(self.project)
+        self.assertTrue(packet.source_receipts[0].stale)
+        self.assertIn("review freshness", packet.text)
+        self.assertIn("Checkout differs", packet.text)
+        self.assertEqual(len(packet.warnings), 2)
+        self.assertLessEqual(len(packet.text), self.store.settings.packet_chars)
+
+    def test_historical_topic_is_available_on_disk_but_not_automatically_retrieved(self) -> None:
+        source = self.root / "retired.md"
+        source.write_text("Context-Status: superseded\n# Renderer\nUse the previous amber renderer.\n")
+        self.store.settings.projects = [Project(slug="example", roots=[self.project], topic_sources=[source])]
+        self.assertNotIn("previous amber", self.store.load(self.project, "amber renderer").text)
+        self.assertIn("previous amber", source.read_text())
 
     def test_linked_directories_database_and_locks_are_rejected(self) -> None:
         outside = self.root / "outside"
