@@ -187,6 +187,18 @@ after successful independent assessments. The lead synthesizes the result.
 Independent advice survives a failed exchange, and configured timeouts still
 apply. The default remains `advisory`.
 
+For an existing canonical update helper, private settings may register a
+`local_adapters` entry with a registered `project`, absolute standalone Python
+`script`, its `sha256`, and allowed `verbs`. Invoke it with
+`agent-context adapter <name> <verb> <arguments...>` from that project. The runtime
+checks project scope, the verb, file type and current hash before running the
+helper through its isolated Python interpreter, with a two-minute timeout and
+the helper's exit status. Changed scripts require deliberate review and a new
+pin. Adapters are trusted local code with the lead's permissions, not a sandbox;
+review their arguments and behavior before registration. They reuse an existing
+canonical workflow without creating another context store or exempting arbitrary
+shell commands from disclosure checks.
+
 Hooks cover participating client sessions. They prompt the lead to save explicit
 preferences, accepted decisions and verified lessons; they do not retain every
 action, monitor other apps, or reconstruct old conversations. Verify retained

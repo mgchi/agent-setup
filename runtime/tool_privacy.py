@@ -115,7 +115,7 @@ def private_command(command: str, cwd: Path, index: DisclosureIndex) -> bool:
             canonical = Path.home() / '.config/agent-context/settings.json'
             if linked(settings) or settings.resolve() != canonical.resolve():
                 return False
-        if len(words) <= offset or words[offset] not in {'load', 'status', 'collect', 'checkpoint', 'remember', 'refresh', 'finish', 'privacy', 'cleanup', 'cooldown', 'forget', 'review', 'begin', 'project'}:
+        if len(words) <= offset or words[offset] not in {'load', 'status', 'collect', 'checkpoint', 'remember', 'refresh', 'finish', 'privacy', 'cleanup', 'cooldown', 'forget', 'review', 'begin', 'project', 'adapter'}:
             return False
         if any(word == '--settings' or word.startswith('--settings=') for word in words[offset + 1:]):
             return False

@@ -779,6 +779,21 @@ def hook(store: Store, settings_path: Path, event: HookInput, client: str) -> st
     return json.dumps({"decision": "block", "reason": reason})
 
 
+def run_adapter(store: Store, name: str, arguments: list[str], cwd: Path) -> int:
+    adapter = store.settings.local_adapters.get(name)
+    if adapter is None or store.scope(cwd) != adapter.project:
+        raise ValueError("No local adapter is registered for this project.")
+    if not arguments or arguments[0] not in adapter.verbs:
+        raise ValueError("This adapter verb is not registered.")
+    regular(adapter.script)
+    with adapter.script.open('rb') as stream:
+        payload = stream.read(2 * 1024 * 1024 + 1)
+    if len(payload) > 2 * 1024 * 1024 or hashlib.sha256(payload).hexdigest() != adapter.sha256:
+        raise ValueError("Local adapter changed; review it before updating its pinned hash.")
+    return subprocess.run([sys.executable, '-I', str(adapter.script), *arguments],
+                          cwd=cwd, check=False, timeout=120).returncode
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     root.add_argument("--settings", type=Path, default=SETTINGS_PATH)
@@ -794,6 +809,10 @@ def parser() -> argparse.ArgumentParser:
     migration.add_argument('--apply', action='store_true')
     migration.add_argument('--backup-root', type=Path)
     migration.add_argument('--restore', type=Path)
+    adapter = commands.add_parser('adapter')
+    adapter.add_argument('--cwd', type=Path, default=Path.cwd())
+    adapter.add_argument('name')
+    adapter.add_argument('arguments', nargs=argparse.REMAINDER)
     for name in ("load", "status", "cleanup", "begin", "collect", "review", "checkpoint", "remember", "refresh", "finish", "privacy", "hook", "worker", "cooldown", "forget"):
         command = commands.add_parser(name)
         if name in {"load", "status", "begin", "privacy"}:
@@ -857,6 +876,8 @@ def main() -> int:
             print(result.model_dump_json(indent=2))
             return 0
         store = Store(load_settings(options.settings))
+        if options.command == 'adapter':
+            return run_adapter(store, options.name, options.arguments, options.cwd)
         output: BaseModel | str
         if options.command == "hook":
             raw = sys.stdin.read(262145)

@@ -126,6 +126,22 @@ class RefreshSettings(BaseModel):
         return path.resolve()
 
 
+class LocalAdapter(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    project: Scope
+    script: Path
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    verbs: list[Scope] = Field(min_length=1, max_length=12)
+
+    @field_validator("script")
+    @classmethod
+    def canonical_script(cls, value: Path) -> Path:
+        path = value.expanduser()
+        if not path.is_absolute() or linked_path(path) or path.suffix != '.py' or not path.is_file():
+            raise ValueError("A local adapter must name an existing absolute Python script without symlinks.")
+        return path.resolve()
+
+
 def default_providers() -> list[Provider]:
     return [
         Provider(name="claude", command=("claude",), model="claude-fable-5-1", effort="max"),
@@ -153,6 +169,7 @@ class Settings(BaseModel):
     max_database_bytes: int = Field(default=8388608, ge=1048576)
     core_memory_keys: list[str] = Field(default_factory=list)
     instruction_sources: dict[str, Path] = Field(default_factory=dict)
+    local_adapters: dict[Scope, LocalAdapter] = Field(default_factory=dict, max_length=12)
 
     @field_validator("context_root")
     @classmethod
@@ -175,6 +192,8 @@ class Settings(BaseModel):
             slugs.add(project.slug)
             roots.update(project.roots)
             common_dirs.update(project.common_dirs)
+        if any(adapter.project not in slugs for adapter in self.local_adapters.values()):
+            raise ValueError("Local adapters must belong to a registered project.")
         # Keep explicit directories under the disclosure-indexed root and unshared.
         if any(project.context_dir and not project.context_dir.is_relative_to(self.context_root) for project in self.projects):
             raise ValueError("Project context directories must be inside the context root.")

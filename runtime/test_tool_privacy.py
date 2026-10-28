@@ -120,6 +120,7 @@ class ToolPrivacyTests(unittest.TestCase):
             ("Edit", {"file_path": str(self.private_file), "old_string": self.phrase, "new_string": "Updated"}),
             ("Bash", {"command": f"cat '{self.private_file}'"}),
             ("exec_command", {"cmd": f"agent-context checkpoint --run fixture --file '{self.private_file}'"}),
+            ("exec_command", {"cmd": f"agent-context adapter canonical checkpoint --file '{self.private_file}'"}),
             ("apply_patch", {"input": f"*** Begin Patch\n*** Update File: {self.private_file}\n@@\n-old\n+{self.phrase}\n*** End Patch"}),
         ]
         for name, payload in requests:
@@ -135,6 +136,8 @@ class ToolPrivacyTests(unittest.TestCase):
             f"cat '{self.private_file}' | other-command",
             f"agent-context review --settings outside.json --answer-file '{self.private_file}'",
             f"agent-context checkpoint --file outside.json '{self.private_file}'",
+            f"agent-context adapter canonical checkpoint --file '{self.private_file}' | other-command",
+            f"agent-context adapter canonical checkpoint --file outside.json '{self.private_file}'",
             f"cat $(echo '{self.private_file}')",
         ]
         for command in commands:

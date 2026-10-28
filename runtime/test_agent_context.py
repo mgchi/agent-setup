@@ -10,10 +10,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from context_store import Capture, Memory, Project, Settings, Store, atomic_text, digest, load_settings, lock, save_model
+from context_store import Capture, LocalAdapter, Memory, Project, Settings, Store, atomic_text, digest, load_settings, lock, save_model
 from agent_context import (
     CONTINUATION, Advice, CheckpointInput, HookInput, MemoryDraft, PhaseResult,
-    add_project, begin, call_provider, checkpoint, collect, hook, read_run, review, run_path, worker,
+    add_project, begin, call_provider, checkpoint, collect, hook, parser, read_run, review, run_adapter, run_path, worker,
 )
 from disclosure import DisclosureError
 from team_runtime import Outcome, Provider
@@ -264,6 +264,57 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.store.memories("example"), [])
         self.assertEqual(self.store.status(self.cwd).pending_inbox, 0)
         self.assertFalse((self.store.root / "workspaces/example/inbox.md").exists())
+
+
+class AdapterTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.repo = self.root / 'repo'
+        self.repo.mkdir()
+        self.script = self.root / 'canonical.py'
+        self.script.write_text("import json, sys\nfrom pathlib import Path\nPath(sys.argv[2]).write_text(json.dumps(sys.argv[1:]))\nsys.exit(7)\n")
+        self.adapter = LocalAdapter(project='example', script=self.script,
+                                    sha256=digest(self.script.read_text()), verbs=['checkpoint'])
+        self.store = Store(Settings(context_root=self.root / 'context',
+                                   projects=[Project(slug='example', roots=[self.repo])],
+                                   local_adapters={'canonical': self.adapter}))
+
+    def test_registered_helper_preserves_literal_arguments_and_exit_status(self) -> None:
+        receipt = self.root / 'receipt.json'
+        arguments = ['checkpoint', str(receipt), '--file', 'private file with spaces', '$(literal)']
+        options = parser().parse_args(['adapter', '--cwd', str(self.repo), 'canonical', *arguments])
+        self.assertEqual(options.arguments, arguments)
+        self.assertEqual(run_adapter(self.store, options.name, options.arguments, options.cwd), 7)
+        self.assertEqual(json.loads(receipt.read_text()), arguments)
+
+    def test_unknown_adapter_project_and_verb_never_execute(self) -> None:
+        other = self.root / 'other'
+        other.mkdir()
+        with patch('context_store.git', return_value=''), patch('agent_context.subprocess.run', side_effect=AssertionError('Must not execute')):
+            for name, arguments, cwd in [('missing', ['checkpoint'], self.repo),
+                                         ('canonical', [], self.repo),
+                                         ('canonical', ['publish'], self.repo),
+                                         ('canonical', ['checkpoint'], other)]:
+                with self.subTest(name=name, arguments=arguments, cwd=cwd), self.assertRaises(ValueError):
+                    run_adapter(self.store, name, arguments, cwd)
+
+    def test_changed_or_linked_scripts_fail_closed(self) -> None:
+        self.script.write_text('raise SystemExit(0)\n')
+        with self.assertRaisesRegex(ValueError, 'changed'):
+            run_adapter(self.store, 'canonical', ['checkpoint'], self.repo)
+        target = self.root / 'replacement.py'
+        self.script.rename(target)
+        self.script.symlink_to(target)
+        with self.assertRaisesRegex(DisclosureError, 'linked-file'):
+            run_adapter(self.store, 'canonical', ['checkpoint'], self.repo)
+        with self.assertRaisesRegex(ValueError, 'without symlinks'):
+            LocalAdapter(project='example', script=self.script, sha256=self.adapter.sha256, verbs=['checkpoint'])
+
+    def test_registration_requires_a_known_project(self) -> None:
+        with self.assertRaisesRegex(ValueError, 'registered project'):
+            Settings(context_root=self.root / 'context', local_adapters={'canonical': self.adapter})
 
 
 class ProjectTests(unittest.TestCase):
