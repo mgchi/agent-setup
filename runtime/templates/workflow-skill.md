@@ -19,7 +19,7 @@ The lead owns all edits, tool calls, validation, and the final answer. Registere
 
 Send only a sanitized task, candidate answer, and narrowly selected evidence. Never send a project-context packet, credentials, private customer or employee details, or raw transcripts. If a safe independent question cannot be constructed, continue without advisers and state the limitation briefly.
 
-Use `agent-context review --run <id> --answer-file <private-file> --request-file <private-file> --evidence <private-file> --wait 40`. Reconcile any available advice against evidence. Use at most one bounded wait, capped at 50 seconds. Credit limits, usage errors, timeouts, and pending advice permit the lead to finish. Projects configured with `collaboration: "exchange"` run one reciprocal assessment round; preserve accepted independent findings if an exchange fails. The lead owns synthesis. Inspect `agent-context status` for diagnostics; do not keep retrying a cooling-down provider.
+Use `agent-context review --run <id> --answer-file <private-file> --request-file <private-file> --evidence <private-file> --wait 40`. Run commands that name private files bare: a pipe, redirect, or variable makes the privacy guard treat those paths as outgoing data. Reconcile any available advice against evidence. Use at most one bounded wait, capped at 50 seconds. Credit limits, usage errors, timeouts, and pending advice permit the lead to finish. Projects configured with `collaboration: "exchange"` run one reciprocal assessment round; preserve accepted independent findings if an exchange fails. The lead owns synthesis. Inspect `agent-context status` for diagnostics; do not keep retrying a cooling-down provider.
 
 ## Completion and memory
 
