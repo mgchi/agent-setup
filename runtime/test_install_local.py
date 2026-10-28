@@ -11,7 +11,7 @@ from unittest.mock import call, patch
 import tomlkit
 
 import install_local
-from context_store import Capture, Cooldown, Memory, Settings, Store, atomic_text
+from context_store import Capture, Cooldown, Memory, Settings, Store, atomic_text, digest
 from install_local import PreferenceSeed, build_plan, import_preferences, install, load_seed, managed_section
 
 
@@ -97,6 +97,17 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(kernel.read_text(), 'Updated personal identity and context.\n')
         self.assertEqual({filename: filename.read_bytes() for filename in before}, before)
         self.assertEqual(Store(self.settings).status(self.home).memory_count, 1)
+
+    def test_installation_manifest_covers_the_exact_runtime_payload(self) -> None:
+        install(self.home, seed_path=self.seed_path)
+        runtime = self.home / '.local/share/agent-context'
+        manifest = json.loads((runtime / 'installation.json').read_text())
+        self.assertEqual(len(manifest['revision']), 40)
+        self.assertIsInstance(manifest['source_dirty'], bool)
+        self.assertIn('instruction_copies.py', manifest['files'])
+        self.assertIn('templates/workflow-skill.md', manifest['files'])
+        for name, expected in manifest['files'].items():
+            self.assertEqual(digest((runtime / name).read_text()), expected)
 
     def test_malformed_markers_abort_before_writes(self) -> None:
         originals = [

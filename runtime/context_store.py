@@ -4,6 +4,7 @@ import codecs
 import contextlib
 import fcntl
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -29,8 +30,13 @@ class Project(BaseModel):
     roots: list[Path] = Field(default_factory=list)
     common_dirs: list[Path] = Field(default_factory=list)
     context_sources: list[Path] = Field(default_factory=list)
+    topic_sources: list[Path] = Field(default_factory=list)
+    topic_dirs: list[Path] = Field(default_factory=list)
+    source_max_age_days: dict[str, Annotated[float, Field(gt=0)]] = Field(default_factory=dict)
+    knowledge_revision: str = ""
     privacy_roots: list[Path] = Field(default_factory=list)
     context_dir: Path | None = None
+    private_github_repository: str = ""
     advisers: bool = True
     collaboration: Literal["advisory", "exchange"] = "advisory"
 
@@ -56,12 +62,12 @@ class Project(BaseModel):
                 result.append(path)
         return result
 
-    @field_validator("context_sources")
+    @field_validator("context_sources", "topic_sources")
     @classmethod
     def source_paths(cls, values: list[Path]) -> list[Path]:
         return list(dict.fromkeys(context_source_path(value) for value in values))
 
-    @field_validator("privacy_roots")
+    @field_validator("privacy_roots", "topic_dirs")
     @classmethod
     def private_paths(cls, values: list[Path]) -> list[Path]:
         paths = cls.project_paths(values)
@@ -81,6 +87,26 @@ class Project(BaseModel):
         return path.resolve()
 
 
+    @model_validator(mode="after")
+    def freshness_sources(self) -> "Project":
+        known = {str(path) for path in self.context_sources + self.topic_paths()}
+        if not self.source_max_age_days.keys() <= known:
+            raise ValueError("Freshness limits must name a registered context or topic source.")
+        if self.private_github_repository and (not self.context_dir or not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', self.private_github_repository)):
+            raise ValueError("A private Git repository needs an adopted context directory and an owner/repository name.")
+        return self
+
+    def topic_paths(self) -> list[Path]:
+        paths = list(self.topic_sources)
+        for directory in self.topic_dirs:
+            if linked_path(directory) or not directory.is_dir():
+                raise ValueError("Topic directories must remain canonical directories.")
+            paths.extend(sorted(directory.glob('*.md')))
+        if len(paths) > 300:
+            raise ValueError("Select narrower topic directories: at most 300 topic files are supported.")
+        return list(dict.fromkeys(context_source_path(path) for path in paths))
+
+
 class RefreshSettings(BaseModel):
     model_config = ConfigDict(extra="allow")
     enabled: bool = False
@@ -97,6 +123,22 @@ class RefreshSettings(BaseModel):
         path = value.expanduser()
         if not path.is_absolute() or linked_path(path):
             raise ValueError("Refresh resources must use an absolute directory without symlinks.")
+        return path.resolve()
+
+
+class LocalAdapter(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    project: Scope
+    script: Path
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    verbs: list[Scope] = Field(min_length=1, max_length=12)
+
+    @field_validator("script")
+    @classmethod
+    def canonical_script(cls, value: Path) -> Path:
+        path = value.expanduser()
+        if not path.is_absolute() or linked_path(path) or path.suffix != '.py' or not path.is_file():
+            raise ValueError("A local adapter must name an existing absolute Python script without symlinks.")
         return path.resolve()
 
 
@@ -126,6 +168,8 @@ class Settings(BaseModel):
     max_local_bytes: int = Field(default=268435456, ge=1048576)
     max_database_bytes: int = Field(default=8388608, ge=1048576)
     core_memory_keys: list[str] = Field(default_factory=list)
+    instruction_sources: dict[str, Path] = Field(default_factory=dict)
+    local_adapters: dict[Scope, LocalAdapter] = Field(default_factory=dict, max_length=12)
 
     @field_validator("context_root")
     @classmethod
@@ -148,6 +192,8 @@ class Settings(BaseModel):
             slugs.add(project.slug)
             roots.update(project.roots)
             common_dirs.update(project.common_dirs)
+        if any(adapter.project not in slugs for adapter in self.local_adapters.values()):
+            raise ValueError("Local adapters must belong to a registered project.")
         # Keep explicit directories under the disclosure-indexed root and unshared.
         if any(project.context_dir and not project.context_dir.is_relative_to(self.context_root) for project in self.projects):
             raise ValueError("Project context directories must be inside the context root.")
@@ -177,6 +223,7 @@ class Memory(BaseModel):
     run_id: str = Field(default="legacy", min_length=1, max_length=100)
     updated: float = Field(default_factory=time.time)
     expires: float = 0
+    review_after: float = 0
 
 
 class SourceReceipt(BaseModel):
@@ -185,6 +232,9 @@ class SourceReceipt(BaseModel):
     size_bytes: int
     truncated: bool = False
     omitted: bool = False
+    modified_at: float = 0
+    role: Literal["core", "topic"] = "core"
+    stale: bool = False
 
 
 class Packet(BaseModel):
@@ -194,6 +244,7 @@ class Packet(BaseModel):
     truncated: bool = False
     source_receipts: list[SourceReceipt] = Field(default_factory=list)
     omitted_sources: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class Capture(BaseModel):
@@ -229,6 +280,17 @@ class StoreStatus(BaseModel):
     cooldowns: list[Cooldown]
     context_root: str
     scope: str
+    memory_kinds: dict[str, int] = Field(default_factory=dict)
+    review_due_count: int = 0
+    retained_runs: int = 0
+    checkpointed_runs: int = 0
+    packet_chars: int = 0
+    omitted_sources: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    sources: list[SourceReceipt] = Field(default_factory=list)
+    installation_revision: str = ""
+    installation_dirty_source: bool = False
+    modified_runtime_files: list[str] = Field(default_factory=list)
 
 
 class CleanupResult(BaseModel):
@@ -254,6 +316,7 @@ _SENSITIVE_PATH = re.compile(
 )
 _STOP_WORDS = set("the and that this with from what when where which have want need work about into then they them your will should could would does please context".split())
 _RUN_NAME = re.compile(r"^(?:run-[a-f0-9]{24}|smoke-[0-9]+)$")
+_MEMORY_LINE = re.compile(r"^.*<!-- agent-memory:[a-f0-9]{64} -->\s*$", re.MULTILINE)
 
 
 def clean(text: str, limit: int = 32000) -> str:
@@ -374,7 +437,7 @@ def read_packet_source(path: Path, limit: int, *, required: bool = False) -> tup
                 raise ValueError(f"Context source changed while reading: {path}")
         body = clean(prefix, limit + 1)
         return body[:limit], SourceReceipt(path=str(path), sha256=fingerprint.hexdigest(),
-            size_bytes=size, truncated=len(prefix) > limit or len(body) > limit)
+            size_bytes=size, modified_at=before.st_mtime, truncated=len(prefix) > limit or len(body) > limit)
     except (OSError, UnicodeError, ValueError) as error:
         if required:
             raise ValueError(f"Cannot read configured context source {path}: {error}") from error
@@ -601,6 +664,7 @@ class Store:
             connection.execute("BEGIN IMMEDIATE")
             changes = persist_memories(connection, memories, self.settings.max_memory)
         self.flush_outbox()
+        self.reconcile_inboxes()
         return changes
 
     def flush_outbox(self) -> None:
@@ -617,21 +681,50 @@ class Store:
             connection.execute("BEGIN IMMEDIATE")
             if connection.execute("SELECT id FROM outbox WHERE id=?", (event,)).fetchone() is None:
                 return
-            path = project_root / "inbox.md"
-            if linked_path(path) or (path.exists() and path.stat().st_size > 200000):
-                raise ValueError("Inbox needs maintenance before publication.")
-            previous = path.read_text() if path.exists() else ""
-            marker = f"<!-- agent-memory:{event} -->"
-            if marker not in previous:
-                line = f"- {time.strftime('%Y-%m-%d')} · {' '.join(memory.text.split())} · {memory.scope} · {memory.source} {marker}\n"
-                atomic_text(path, previous + ("\n" if previous and not previous.endswith("\n") else "") + line)
+            self.write_inbox(connection, memory.scope, project_root)
             connection.execute("DELETE FROM outbox WHERE id=?", (event,))
+
+    def inbox_text(self, connection: sqlite3.Connection, scope: str, previous: str, *, include_generated: bool = True) -> str:
+        """Project runtime-owned entries from active rows; preserve human prose."""
+        rows = connection.execute(
+            "SELECT payload FROM memory WHERE scope=? AND (expires=0 OR expires>?) ORDER BY updated DESC, key",
+            (scope, time.time()),
+        ).fetchall()
+        lines = []
+        for row in rows if include_generated else []:
+            memory = Memory.model_validate_json(row[0])
+            if memory.kind != "decision" or (memory.review_after and memory.review_after <= time.time()):
+                continue
+            event = digest(memory.scope + memory.key + memory.text)
+            date = time.strftime('%Y-%m-%d', time.localtime(memory.updated))
+            lines.append(f"- {date} · {' '.join(memory.text.split())} · {memory.scope} · {memory.source} <!-- agent-memory:{event} -->")
+        human = _MEMORY_LINE.sub("", previous).rstrip()
+        return (human + ("\n\n" if human and lines else "") + "\n".join(lines)).rstrip() + "\n"
+
+    def write_inbox(self, connection: sqlite3.Connection, scope: str, project_root: Path) -> None:
+        path = project_root / "inbox.md"
+        if linked_path(path) or (path.exists() and path.stat().st_size > 200000):
+            raise ValueError("Inbox needs maintenance before publication.")
+        previous = path.read_text() if path.exists() else ""
+        current = self.inbox_text(connection, scope, previous)
+        if current != previous and (current.strip() or path.exists()):
+            atomic_text(path, current)
+
+    def reconcile_inboxes(self) -> None:
+        for project in self.settings.projects:
+            project_root = self.settings.project_root(project.slug)
+            if not (project_root / "inbox.md").exists():
+                continue
+            with lock(project_root / "local/publish.lock"), self.connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                self.write_inbox(connection, project.slug, project_root)
 
     def memories(self, scope: str) -> list[Memory]:
         with self.connection() as connection:
             rows = connection.execute("SELECT payload FROM memory WHERE (expires=0 OR expires>?) AND (scope=? OR scope='personal') ORDER BY updated DESC LIMIT ?",
                                      (time.time(), scope, self.settings.max_memory)).fetchall()
-        return [Memory.model_validate_json(row[0]) for row in rows]
+        memories = [Memory.model_validate_json(row[0]) for row in rows]
+        return [memory for memory in memories if not memory.review_after or memory.review_after > time.time()]
 
     def disclosure_memories(self) -> list[Memory]:
         with self.connection() as connection:
@@ -689,6 +782,7 @@ class Store:
         with self.connection() as connection:
             connection.execute("DELETE FROM memory WHERE scope=? AND key=?", (scope, key))
             connection.execute("DELETE FROM outbox WHERE json_extract(payload, '$.scope')=? AND json_extract(payload, '$.key')=?", (scope, key))
+        self.reconcile_inboxes()
 
     def prune(self) -> CleanupResult:
         now = time.time()
@@ -699,6 +793,7 @@ class Store:
             connection.execute("DELETE FROM cooldown WHERE until<=?", (now,))
         with contextlib.closing(sqlite3.connect(self.db, timeout=5)) as connection:
             connection.execute("VACUUM")
+        self.reconcile_inboxes()
         return self.prune_runs()
 
     def prune_runs(self) -> CleanupResult:
@@ -749,16 +844,56 @@ class Store:
             capture_count = connection.execute("SELECT COUNT(*) FROM capture").fetchone()[0]
             pending = connection.execute("SELECT COUNT(*) FROM outbox").fetchone()[0]
             rows = connection.execute("SELECT payload FROM cooldown WHERE until>?", (time.time(),)).fetchall()
+            kinds = dict(connection.execute("SELECT json_extract(payload, '$.kind'), COUNT(*) FROM memory WHERE expires=0 OR expires>? GROUP BY 1", (time.time(),)).fetchall())
+            due = connection.execute("SELECT COUNT(*) FROM memory WHERE (expires=0 OR expires>?) AND json_extract(payload, '$.review_after')>0 AND json_extract(payload, '$.review_after')<=?", (time.time(), time.time())).fetchone()[0]
+        runs = [path for path in (self.local / "runs").glob("run-*") if path.is_dir() and not linked_path(path)]
+        packet = self.load(cwd)
+        runtime = Path(__file__).resolve().parent
+        manifest_path = runtime / "installation.json"
+        manifest, drift = {}, []
+        try:
+            manifest = json.loads(read_text(manifest_path) or "{}")
+            if (not isinstance(manifest, dict) or not isinstance(manifest.get("files", {}), dict)
+                    or not isinstance(manifest.get("revision", ""), str)
+                    or not isinstance(manifest.get("source_dirty", False), bool)):
+                raise ValueError("Invalid installation manifest")
+            for name, expected in manifest.get("files", {}).items():
+                if not isinstance(expected, str):
+                    raise ValueError("Invalid installation fingerprint")
+                if (Path(name).is_absolute() or '..' in Path(name).parts or linked_path(runtime / name)
+                        or not (runtime / name).is_file() or digest((runtime / name).read_text()) != expected):
+                    drift.append(name)
+            if manifest.get("files"):
+                installed = {str(path.relative_to(runtime)) for path in runtime.glob('*.py') if not path.name.startswith('test_')}
+                installed.update(str(path.relative_to(runtime)) for path in (runtime / 'templates').glob('*') if path.is_file())
+                drift.extend(sorted(installed - manifest['files'].keys()))
+        except (OSError, ValueError):
+            manifest, drift = {}, []
+            packet.warnings.append("Installation provenance is unreadable; reinstall to restore verification.")
+        if manifest.get("source_dirty"):
+            packet.warnings.append("Runtime was installed from an uncommitted source tree.")
+        if not manifest.get("revision"):
+            packet.warnings.append("Installed source revision is unknown.")
+        if drift:
+            packet.warnings.append("Installed runtime differs from its installation manifest.")
         return StoreStatus(memory_count=memory_count, capture_count=capture_count, pending_inbox=pending,
-                           cooldowns=[Cooldown.model_validate_json(row[0]) for row in rows], context_root=str(self.root), scope=self.scope(cwd))
+                           cooldowns=[Cooldown.model_validate_json(row[0]) for row in rows], context_root=str(self.root), scope=self.scope(cwd),
+                           memory_kinds=kinds, review_due_count=due, retained_runs=len(runs),
+                           checkpointed_runs=sum((path / "checkpoint.json").is_file() for path in runs),
+                           packet_chars=len(packet.text), omitted_sources=packet.omitted_sources, warnings=packet.warnings, sources=packet.source_receipts,
+                           installation_revision=manifest.get("revision", ""), installation_dirty_source=manifest.get("source_dirty", False), modified_runtime_files=drift)
 
     def load(self, cwd: Path, query: str = "") -> Packet:
         scope = self.scope(cwd, query)
         root = self.root if scope == "personal" else self.settings.project_root(scope)
+        project = self.settings.project(scope)
+        warning = ""
+        if project and project.knowledge_revision and git(cwd, ["rev-parse", "HEAD"]) != project.knowledge_revision:
+            warning = "Checkout differs from the revision last reconciled with canonical knowledge. Verify current source before relying on status claims."
         with lock(root / "local/publish.lock", shared=True):
-            return self._load(scope, query)
+            return self._load(scope, query, warning)
 
-    def _load(self, scope: Scope, query: str) -> Packet:
+    def _load(self, scope: Scope, query: str, revision_warning: str = "") -> Packet:
         query_terms = terms(query)
         background: dict[Path, tuple[str, SourceReceipt]] = {}
         path = self.local / "personal.md"
@@ -767,16 +902,16 @@ class Store:
             background[path] = source
         project_root = self.settings.project_root(scope)
         complete_digest = not (project_root / "local/refresh/pending.json").exists()
-        warning = ""
+        warning = revision_warning
         if scope != "personal":
             names = ["context.md", "playbook.md"]
             if complete_digest:
                 names.extend(["brief.md", "decisions.md", "inbox.md"])
             else:
-                warning = "Project digest publication was interrupted. Verify live sources until refresh recovery completes."
+                warning += " Project digest publication was interrupted. Verify live sources until refresh recovery completes."
             for name in names:
                 path = project_root / name
-                source = read_packet_source(path, 4200 if name == "brief.md" else 2200)
+                source = read_packet_source(path, 200000 if name == "inbox.md" else 4200 if name == "brief.md" else 2200)
                 if source is not None:
                     background[path] = source
             project = self.settings.project(scope)
@@ -790,9 +925,15 @@ class Store:
             paths = [project_root / "people.md", project_root / "decisions.md"]
             for directory in ("projects", "customers", "meetings"):
                 paths.extend(sorted((project_root / directory).glob("*.md"), reverse=True)[:300])
-            for path in paths:
+            project = self.settings.project(scope)
+            if project:
+                paths.extend(project.topic_paths())
+            for path in dict.fromkeys(paths):
                 body = read_text(path, 24000)
-                score = len(terms(body) & query_terms) + 3 * len(terms(path.stem) & query_terms)
+                if re.search(r"(?im)^context-status:\s*(?:historical|superseded|archived)\s*$", body):
+                    continue
+                filename_terms = terms(path.stem) | terms(path.stem.replace('-', ' ').replace('_', ' '))
+                score = len(terms(body) & query_terms) + 3 * len(filename_terms & query_terms)
                 if score >= 2:
                     candidates.append((score, path))
             for _, path in sorted(candidates, key=lambda value: (value[0], value[1].name), reverse=True)[:2]:
@@ -800,6 +941,7 @@ class Store:
                 if source is None:
                     continue
                 body, receipt = source
+                receipt.role = "topic"
                 lines = body.splitlines()
                 selected = set(range(min(3, len(lines))))
                 for index, line in enumerate(lines):
@@ -813,6 +955,22 @@ class Store:
                     background[path] = (previous + "\n\nRelevant lines:\n" + excerpt[:1800], receipt)
                 else:
                     background[path] = (excerpt[:1800], receipt)
+
+        inbox = project_root / "inbox.md"
+        if scope != "personal" and inbox in background:
+            body, receipt = background[inbox]
+            if receipt.truncated:
+                raise ValueError("Inbox exceeds its maintenance budget.")
+            with self.connection() as connection:
+                filtered = self.inbox_text(connection, scope, body, include_generated=False)
+            background[inbox] = (filtered, receipt)
+        project = self.settings.project(scope)
+        warnings = [warning.strip()] if warning else []
+        for path, (_, receipt) in background.items():
+            age_limit = project.source_max_age_days.get(str(path)) if project else None
+            receipt.stale = bool(age_limit and time.time() - receipt.modified_at > age_limit * 86400)
+            if receipt.stale:
+                warnings.append(f"Source exceeds its {age_limit:g}-day freshness limit: {path}")
 
         notices = {path: f"[Source omitted from packet; read full file: {path}]" for path in background}
         minimum_sections = [*([warning] if warning else []), *notices.values()]
@@ -830,6 +988,8 @@ class Store:
         heading = "Saved context (current instructions take precedence):\n"
         remaining = min(3000, self.settings.packet_chars - minimum_size - (2 if minimum_size else 0)) - len(heading)
         for item in ranked:
+            if query_terms and item.kind != "preference" and item.key not in self.settings.core_memory_keys and not terms(item.text + " " + item.key) & query_terms:
+                continue
             line = f"- [{item.key}; {item.source}] {item.text}"
             if len(memory_lines) == 12 or len(line) + 1 > remaining:
                 truncated = True
@@ -841,10 +1001,13 @@ class Store:
         if warning:
             sections.append(warning)
         reserved = sum(len(notice) + 2 for notice in notices.values())
+        fair_share = max(0, (self.settings.packet_chars - len("\n\n".join(sections)) - reserved - 200 * len(background)) // max(1, len(background)))
+        allowances = {path: min(len(body), fair_share) for path, (body, _) in background.items()}
         for path, (body, receipt) in background.items():
             reserved -= len(notices[path]) + 2
-            available = self.settings.packet_chars - len("\n\n".join(sections)) - (2 if sections else 0) - reserved
-            label = f"Source: {path} (file modified {time.strftime('%Y-%m-%d', time.localtime(modified(path)))})\n"
+            allowances.pop(path)
+            available = self.settings.packet_chars - len("\n\n".join(sections)) - (2 if sections else 0) - reserved - sum(allowances.values())
+            label = f"Source: {path} (file modified {time.strftime('%Y-%m-%d', time.localtime(receipt.modified_at))}{'; review freshness' if receipt.stale else ''})\n"
             marker = f"\n[Source truncated; read full file: {path}]"
             section = label + body + (marker if receipt.truncated else "")
             if len(section) > available:
@@ -863,7 +1026,7 @@ class Store:
             truncated = truncated or receipt.truncated
         combined = "\n\n".join(sections)
         return Packet(scope=scope, text=combined, sources=sources, truncated=truncated,
-                      source_receipts=receipts, omitted_sources=omitted)
+                      source_receipts=receipts, omitted_sources=omitted, warnings=warnings)
 
 
 def load_settings(path: Path) -> Settings:

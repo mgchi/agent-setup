@@ -143,10 +143,61 @@ and untracked content. It does not attest remote synchronization, hosted checks,
 deployment, or resource cleanup. A changed finalized run needs a new checkpoint
 in a new run. Empty checkpoints use `checkpoint --run <id> --none`.
 
+Use `context_sources` for the small standing brief, and `topic_sources` or
+`topic_dirs` for explicit topic files or directories whose immediate Markdown
+children are searched only when relevant. New files in a selected topic directory
+are discovered automatically. At most two matching excerpts enter a packet;
+unregistered projects and personal scope cannot retrieve them. Mark a retired
+topic with `Context-Status: historical`, `superseded`, or `archived` to preserve it
+on disk while excluding it from automatic topic retrieval. Core source contents
+reserve room for later sources, including a short live brief.
+
+Optional `source_max_age_days` maps registered source paths to freshness limits.
+These measure file age, not truth. `knowledge_revision` records the product Git
+revision last reconciled with canonical knowledge; a different checkout produces
+a visible warning. Update it deliberately after reconciling current facts.
+`agent-context status` reports source ages, omissions, freshness warnings, memory
+kinds, review-due entries, retained runs/checkpoints, installation revision, and
+runtime file drift. Retained run counts are a bounded sample, not lifetime usage.
+
+Checkpoint memory drafts accept optional Unix timestamps `review_after` and
+`expires`. Review-due entries stay available for deliberate review but leave the
+automatic packet. Forgetting, expiry, replacement, and eviction also retire the
+runtime-owned entries in the generated inbox. Human-authored prose is preserved;
+the runtime never silently rewrites canonical decisions. Reconcile a material
+outcome into its existing topic and current brief, preserve old evidence in Git
+or history, and checkpoint only the supported reusable memory that remains.
+
+An adopted context directory may set `private_github_repository` to its exact
+`owner/repository` destination. Before checking or publishing its staged files,
+the guard verifies the canonical repository root, the sole `origin` remote and
+all resolved push URLs, and confirms private visibility through the authenticated
+`gh` CLI. Only this verified destination permits private context text; credentials
+remain forbidden. Unknown visibility, changed remotes and push URL overrides fail
+closed. This does not relax public-repository or arbitrary-upload checks.
+
+For an explicitly configured instruction-copy workflow, private settings may
+provide `instruction_sources` mapping output Markdown filenames to source files.
+`privacy --instruction-copies <private-local-directory>` exports only that bounded
+list after credential redaction and disclosure validation. It rejects private
+context sources and existing destinations; it is not a general file reader.
+
 Projects can set `collaboration` to `exchange` to request one reciprocal round
 after successful independent assessments. The lead synthesizes the result.
 Independent advice survives a failed exchange, and configured timeouts still
 apply. The default remains `advisory`.
+
+For an existing canonical update helper, private settings may register a
+`local_adapters` entry with a registered `project`, absolute standalone Python
+`script`, its `sha256`, and allowed `verbs`. Invoke it with
+`agent-context adapter <name> <verb> <arguments...>` from that project. The runtime
+checks project scope, the verb, file type and current hash before running the
+helper through its isolated Python interpreter, with a two-minute timeout and
+the helper's exit status. Changed scripts require deliberate review and a new
+pin. Adapters are trusted local code with the lead's permissions, not a sandbox;
+review their arguments and behavior before registration. They reuse an existing
+canonical workflow without creating another context store or exempting arbitrary
+shell commands from disclosure checks.
 
 Hooks cover participating client sessions. They prompt the lead to save explicit
 preferences, accepted decisions and verified lessons; they do not retain every

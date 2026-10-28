@@ -23,9 +23,28 @@ Use `agent-context review --run <id> --answer-file <private-file> --request-file
 
 ## Completion and memory
 
+First reconcile material changes to canonical knowledge: update the existing
+topic and compact current brief with verified sources, keep proposals distinct
+from accepted decisions, and preserve superseded evidence in history. Routine
+work may explicitly record no knowledge change. Do not create a second narrative
+in derived memory. Inspect `status` for stale sources, packet omissions and
+checkout drift; update a configured `knowledge_revision` only after reconciliation.
+Registered `topic_dirs` discover relevant new Markdown records. A topic marked
+`Context-Status: historical`, `superseded`, or `archived` stays on disk and leaves
+automatic retrieval. Optional memory `review_after` and `expires` timestamps
+bound time-sensitive claims. Retirement reconciles runtime-owned inbox entries;
+human-authored source prose still needs deliberate curation.
+
 Retain only explicit preferences, accepted decisions, and verified reusable lessons with their supporting evidence. Use the existing key when correcting a memory. Checkpoint with `agent-context checkpoint --run <id> --file <private-file>` using the CLI's schema, or `agent-context checkpoint --run <id> --none` when nothing durable changed. External context sources remain authoritative and are never rewritten by the runtime. Curate accepted changes there through the project's existing approved workflow; the local memory/outbox is a retrieval aid. If authoritative sources changed, run `agent-context refresh --run <id>`, read its current packet, then checkpoint. Run `agent-context finish --run <id>` against the final checkout. A changed checkout or source invalidates completion; start a new run to record the new revision. The outbox records project decisions once; do not duplicate an inbox entry manually.
 
 Context has fixed retrieval, memory, capture, run, artifact, and database budgets. Maintenance removes expired task material and consolidates retained context. Automatic hooks cover participating client sessions only. Durable memory requires explicit, evidence-backed checkpoints; arbitrary app activity and every conversation are not captured. Do not save whole conversations or speculative lessons. Remove temporary prompts, answers, and evidence after capture. A missing runtime permits manual selective context reads and append-once project decisions.
+
+An explicitly registered local adapter can run an existing canonical update
+helper through `agent-context adapter <name> <verb> <arguments...>`. Registration
+pins the standalone Python script's hash, project and verbs. Use the existing
+approved helper; never register arbitrary commands to evade a disclosure denial.
+Review changed helper code before updating its pin. This is trusted local code,
+not a sandbox or permission to publish private material.
 
 ## Privacy
 

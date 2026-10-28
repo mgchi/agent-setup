@@ -115,7 +115,7 @@ def private_command(command: str, cwd: Path, index: DisclosureIndex) -> bool:
             canonical = Path.home() / '.config/agent-context/settings.json'
             if linked(settings) or settings.resolve() != canonical.resolve():
                 return False
-        if len(words) <= offset or words[offset] not in {'load', 'status', 'collect', 'checkpoint', 'remember', 'refresh', 'finish', 'privacy', 'cleanup', 'cooldown', 'forget', 'review', 'begin', 'project'}:
+        if len(words) <= offset or words[offset] not in {'load', 'status', 'collect', 'checkpoint', 'remember', 'refresh', 'finish', 'privacy', 'cleanup', 'cooldown', 'forget', 'review', 'begin', 'project', 'adapter'}:
             return False
         if any(word == '--settings' or word.startswith('--settings=') for word in words[offset + 1:]):
             return False
@@ -187,11 +187,11 @@ def references(texts: list[str], cwd: Path) -> set[Path]:
         for candidate in candidates:
             if not candidate or '\x00' in candidate or '://' in candidate or len(candidate) > 4096:
                 continue
-            path = path_at(candidate, cwd)
             try:
+                path = path_at(candidate, cwd)
                 if path.exists() or path.is_symlink():
                     paths.add(path)
-            except OSError:
+            except (OSError, RuntimeError, ValueError):
                 continue
     return paths
 
@@ -274,7 +274,30 @@ def head_matches(index: DisclosureIndex, cwd: Path) -> set[tuple[str, str]]:
     return matches
 
 
+def verified_private_repository(index: DisclosureIndex, cwd: Path) -> bool:
+    expected = index.private_github_repositories.get(str(cwd.resolve()))
+    if not expected:
+        return False
+    root = git_bytes(cwd, ['rev-parse', '--show-toplevel']).decode().strip()
+    remotes = git_bytes(cwd, ['remote']).decode().splitlines()
+    urls = git_bytes(cwd, ['remote', 'get-url', '--push', '--all', 'origin']).decode().splitlines()
+    allowed = {f'https://github.com/{expected}', f'https://github.com/{expected}.git',
+               f'git@github.com:{expected}', f'git@github.com:{expected}.git'}
+    if linked(cwd) or Path(root).resolve() != cwd.resolve() or remotes != ['origin'] or not urls or not set(urls) <= allowed:
+        raise DisclosureError('private-repository-destination')
+    try:
+        result = subprocess.run(['gh', 'api', '--hostname', 'github.com', f'repos/{expected}', '--jq', '.private'],
+                                capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        raise DisclosureError('private-repository-unverified') from None
+    if result.returncode or result.stdout.strip() != 'true':
+        raise DisclosureError('private-repository-unverified')
+    return True
+
+
 def staged(index: DisclosureIndex, cwd: Path) -> None:
+    private_destination = verified_private_repository(index, cwd)
+    scanner = DisclosureIndex(root=index.root) if private_destination else index
     names = git_bytes(cwd, ['diff', '--cached', '--name-only', '--diff-filter=ACMRTUXB', '-z']).split(b'\0')
     baseline: set[tuple[str, str]] | None = None
     for raw_name in names:
@@ -289,9 +312,11 @@ def staged(index: DisclosureIndex, cwd: Path) -> None:
             mode, oid, stage = metadata.split()
             if mode not in {b'100644', b'100755'} or stage != b'0':
                 raise DisclosureError('linked-or-unmerged-staged-file')
-            found = index.matches(git_bytes(cwd, ['cat-file', 'blob', oid.decode()]))
+            found = scanner.matches(git_bytes(cwd, ['cat-file', 'blob', oid.decode()]))
             if not found:
                 continue
+            if private_destination:
+                raise DisclosureError(sorted(found)[0][0])
             previous = git_bytes(cwd, ['show', f'HEAD:{name}'], missing=True)
             fresh = found - index.matches(previous)
             if fresh:
@@ -333,6 +358,18 @@ def staged_commands(index: DisclosureIndex, cwd: Path, texts: list[str]) -> None
                         raise DisclosureError('ambiguous-git-command')
                 if arguments and arguments[0] in {'commit', 'push'}:
                     inspected = True
+                    if arguments[0] == 'push' and str(target.resolve()) in index.private_github_repositories:
+                        positional = []
+                        for argument in arguments[1:]:
+                            if argument.startswith('-'):
+                                if argument not in {'-u', '--set-upstream', '--dry-run'}:
+                                    raise DisclosureError('private-repository-push-arguments')
+                            else:
+                                positional.append(argument)
+                        if positional and (positional[0] != 'origin' or any(
+                                not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_./:+-]*', ref) or '://' in ref
+                                for ref in positional[1:])):
+                            raise DisclosureError('private-repository-push-arguments')
                     if target not in checked:
                         staged(index, target)
                         checked.add(target)
