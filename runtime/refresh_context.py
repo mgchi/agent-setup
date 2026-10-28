@@ -481,7 +481,7 @@ def main() -> int:
         target = settings.refresh.project
         if target is None or settings.project(target) is None:
             raise ValueError("Configure a registered refresh project before refreshing or validating a digest.")
-        root = settings.context_root / "workspaces" / target
+        root = settings.project_root(target)
         if args.validate_stage:
             validate_stage(args.validate_stage, snapshot(root), args.run_id, root)
         else:

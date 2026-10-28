@@ -175,6 +175,17 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.store.status(self.cwd).capture_count, 1)
         self.spawner.assert_not_called()
 
+    def test_checkpointed_run_stops_without_a_review(self) -> None:
+        run_id = self.start()
+        self.assertTrue(read_run(self.store, run_id).providers)
+        checkpoint(self.store, run_id, CheckpointInput())
+        self.assertEqual(hook(self.store, self.settings_path, self.event("Stop", last_assistant_message="Answer"), "codex"), "")
+
+    def test_stop_reminder_asks_for_the_complete_answer_again(self) -> None:
+        self.start()
+        response = hook(self.store, self.settings_path, self.event("Stop", last_assistant_message="Answer"), "codex")
+        self.assertIn("restate the complete final answer", json.loads(response)["reason"])
+
     def test_nullable_last_message_and_hook_recursion_guards(self) -> None:
         self.start()
         response = hook(self.store, self.settings_path, self.event("Stop", last_assistant_message=None), "codex")
@@ -282,6 +293,16 @@ class ProjectTests(unittest.TestCase):
         self.assertEqual(project, again)
         self.assertEqual(context.read_text(), 'Keep existing project knowledge.\n')
         self.assertEqual(len(load_settings(self.settings_path).projects), 1)
+
+    def test_registration_keeps_an_adopted_context_dir(self) -> None:
+        context_root = self.root / 'context'
+        context_root.mkdir(exist_ok=True)
+        save_model(self.settings_path, Settings(context_root=context_root,
+                   projects=[Project(slug='example', roots=[self.repo], context_dir=context_root)]))
+        project = add_project(self.settings_path, 'example', self.repo)
+        self.assertEqual(project.context_dir, context_root)
+        self.assertTrue((context_root / 'inbox.md').exists())
+        self.assertFalse((context_root / 'workspaces').exists())
 
     def test_nested_and_unregistered_repositories_stay_isolated(self) -> None:
         add_project(self.settings_path, 'example', self.repo)

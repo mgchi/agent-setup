@@ -125,7 +125,7 @@ def add_project(settings_path: Path, slug: str, path: Path) -> Project:
                 "common_dirs": [*current.common_dirs, *registration.common_dirs]})
         projects = [project for project in settings.projects if project.slug != slug]
         updated = Settings.model_validate({**settings.model_dump(), 'projects': [*projects, registration]})
-        root = settings.context_root / 'workspaces' / slug
+        root = updated.project_root(slug)
         for name in ('context', 'decisions', 'playbook', 'inbox'):
             target = root / f'{name}.md'
             if linked_path(target):
@@ -164,7 +164,8 @@ class HookInput(BaseModel):
 def disclosure_index(store: Store) -> DisclosureIndex:
     return build_index(store.root, (item.text + "\n" + item.evidence for item in store.disclosure_memories()),
         source_files=[path for project in store.settings.projects for path in project.context_sources],
-        private_roots=[path for project in store.settings.projects for path in project.privacy_roots])
+        private_roots=[path for project in store.settings.projects for path in project.privacy_roots],
+        context_dirs=[project.context_dir for project in store.settings.projects if project.context_dir])
 
 
 def complete_text(path: Path) -> str:
@@ -743,15 +744,16 @@ def hook(store: Store, settings_path: Path, event: HookInput, client: str) -> st
     capture = store.captured(run.run_id)
     if capture:
         store.capture(capture.model_copy(update={"final": final}))
-    current = collect(store, run.run_id, settings_path=settings_path)
-    reviewed = not run.providers or (current.review is not None and current.review.status == "complete")
+    reconcile(store, run.run_id)
     checkpointed = (directory / "checkpoint.json").exists()
     candidates = store.preference_candidates(run.run_id) + store.decision_candidates(run.run_id)
     if not run.providers and not candidates and run.scope == "personal":
         if not checkpointed:
             checkpoint(store, run.run_id, CheckpointInput(note="No explicit preference or accepted decision candidate; lead may retain verified lessons separately."))
         return ""
-    if reviewed and checkpointed:
+    # The checkpoint is the lead's own finish, and review stays optional. Blocking
+    # after it forces one more reply, which hides the answer in last-message views.
+    if checkpointed:
         return ""
     store.set_session(previous.model_copy(update={"continued": True, "updated": time.time()}))
     reason = (f"{CONTINUATION} Finish the existing run {run.run_id}: collect available assessment/review with "
@@ -759,7 +761,8 @@ def hook(store: Store, settings_path: Path, event: HookInput, client: str) -> st
               "Wait at most once. Pending or failed providers do not block completion. Do not launch an automatic review from this reminder. "
               "Checkpoint only explicit durable preferences, accepted decisions, or verified reusable lessons; "
               f"otherwise run {cli_command(settings_path)} checkpoint --run {run.run_id} --none. "
-              "Then provide the final answer. This reminder is automatic and is not memory evidence. You get one reminder only.")
+              "Then restate the complete final answer, because some clients show only the last message of a turn. "
+              "This reminder is automatic and is not memory evidence. You get one reminder only.")
     return json.dumps({"decision": "block", "reason": reason})
 
 

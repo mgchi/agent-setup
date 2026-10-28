@@ -30,6 +30,7 @@ class Project(BaseModel):
     common_dirs: list[Path] = Field(default_factory=list)
     context_sources: list[Path] = Field(default_factory=list)
     privacy_roots: list[Path] = Field(default_factory=list)
+    context_dir: Path | None = None
     advisers: bool = True
     collaboration: Literal["advisory", "exchange"] = "advisory"
 
@@ -67,6 +68,17 @@ class Project(BaseModel):
         if any(not path.is_dir() or any(char in str(path) for char in "*?[") for path in paths):
             raise ValueError("Privacy roots must be explicit existing directories.")
         return paths
+
+    @field_validator("context_dir")
+    @classmethod
+    def context_directory(cls, value: Path | None) -> Path | None:
+        if value is None:
+            return None
+        path = value.expanduser()
+        if (not path.is_absolute() or linked_path(path) or not path.is_dir()
+                or any(char in str(path) for char in "*?[")):
+            raise ValueError("A project context directory must be an existing absolute directory without symlinks.")
+        return path.resolve()
 
 
 class RefreshSettings(BaseModel):
@@ -136,10 +148,22 @@ class Settings(BaseModel):
             slugs.add(project.slug)
             roots.update(project.roots)
             common_dirs.update(project.common_dirs)
+        # Keep explicit directories under the disclosure-indexed root and unshared.
+        if any(project.context_dir and not project.context_dir.is_relative_to(self.context_root) for project in self.projects):
+            raise ValueError("Project context directories must be inside the context root.")
+        project_roots = [self.project_root(project.slug) for project in self.projects]
+        if len(set(project_roots)) != len(project_roots):
+            raise ValueError("Each project needs its own context directory.")
         return self
 
     def project(self, scope: str) -> Project | None:
         return next((project for project in self.projects if project.slug == scope), None)
+
+    def project_root(self, scope: str) -> Path:
+        project = self.project(scope)
+        if project is not None and project.context_dir is not None:
+            return project.context_dir
+        return self.context_root / "workspaces" / scope
 
 
 class Memory(BaseModel):
@@ -551,7 +575,7 @@ class Store:
         if common:
             return "personal"
         for project in self.settings.projects:
-            if cwd.resolve().is_relative_to(self.root / "workspaces" / project.slug):
+            if cwd.resolve().is_relative_to(self.settings.project_root(project.slug)):
                 return project.slug
         return "personal"
 
@@ -584,7 +608,7 @@ class Store:
             rows = connection.execute("SELECT id, payload FROM outbox").fetchall()
         for event, payload in rows:
             memory = Memory.model_validate_json(payload)
-            project_root = self.root / "workspaces" / memory.scope
+            project_root = self.settings.project_root(memory.scope)
             with lock(project_root / "local/publish.lock"):
                 self.publish_memory(event, memory, project_root)
 
@@ -730,7 +754,7 @@ class Store:
 
     def load(self, cwd: Path, query: str = "") -> Packet:
         scope = self.scope(cwd, query)
-        root = self.root if scope == "personal" else self.root / "workspaces" / scope
+        root = self.root if scope == "personal" else self.settings.project_root(scope)
         with lock(root / "local/publish.lock", shared=True):
             return self._load(scope, query)
 
@@ -741,7 +765,7 @@ class Store:
         source = read_packet_source(path, 5000)
         if source is not None:
             background[path] = source
-        project_root = self.root / "workspaces" / scope
+        project_root = self.settings.project_root(scope)
         complete_digest = not (project_root / "local/refresh/pending.json").exists()
         warning = ""
         if scope != "personal":

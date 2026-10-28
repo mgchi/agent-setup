@@ -155,7 +155,7 @@ class RawScanner:
 
 
 def build_index(root: Path, memories: Iterable[str] = (), *, source_files: Iterable[Path] = (),
-                private_roots: Iterable[Path] = ()) -> DisclosureIndex:
+                private_roots: Iterable[Path] = (), context_dirs: Iterable[Path] = ()) -> DisclosureIndex:
     if linked(root):
         raise DisclosureError('linked-context')
     index = DisclosureIndex(root=root.expanduser().resolve(), source_files=list(source_files), private_roots=list(private_roots))
@@ -163,10 +163,10 @@ def build_index(root: Path, memories: Iterable[str] = (), *, source_files: Itera
     if linked(workspaces):
         raise DisclosureError('linked-context')
     roots = [root]
-    for project in sorted(workspaces.glob('*')):
+    for project in [*sorted(workspaces.glob('*')), *context_dirs]:
         if linked(project):
             raise DisclosureError('linked-context')
-        if project.is_dir():
+        if project.is_dir() and project not in roots:
             roots.append(project)
     files: set[Path] = set()
     for source in index.source_files:

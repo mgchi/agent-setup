@@ -203,6 +203,43 @@ class ContextTests(unittest.TestCase):
         self.assertLessEqual(len(packet.text), self.store.settings.packet_chars)
         self.assertNotIn(".env", json.dumps(packet.sources))
 
+    def test_context_dir_keeps_an_existing_digest_in_place(self) -> None:
+        context_root = self.root / "context"
+        store = Store(Settings(context_root=context_root, projects=[
+            Project(slug="example", roots=[self.project], context_dir=context_root)]))
+        store.capture(Capture(run_id="test", prompt="I decided to ship the editor this week.", scope="example"))
+        atomic_text(context_root / "brief.md", "Existing root digest.")
+        packet = store.load(self.project)
+        self.assertEqual(packet.scope, "example")
+        self.assertIn("Existing root digest.", packet.text)
+        store.remember(self.memory(kind="decision", scope="example", evidence="I decided to ship the editor this week.",
+                                   text="Ship the editor this week."))
+        self.assertIn("Ship the editor this week.", (context_root / "inbox.md").read_text())
+        self.assertFalse((context_root / "workspaces").exists())
+
+    def test_context_dir_must_be_inside_the_root_and_unshared(self) -> None:
+        context_root = self.root / "context"
+        outside = self.root / "outside"
+        outside.mkdir()
+        (context_root / "workspaces/other").mkdir(parents=True)
+        invalid = [
+            [Project(slug="example", context_dir=outside)],
+            [Project(slug="example", context_dir=context_root), Project(slug="other", context_dir=context_root)],
+            [Project(slug="example", context_dir=context_root / "workspaces/other"), Project(slug="other")],
+        ]
+        for projects in invalid:
+            with self.subTest(projects=[project.slug for project in projects]):
+                with self.assertRaises(ValueError):
+                    Settings(context_root=context_root, projects=projects)
+        linked = context_root / "linked"
+        linked.symlink_to(context_root / "local", target_is_directory=True)
+        for value in (linked, self.root / "missing", Path("relative")):
+            with self.subTest(context_dir=str(value)):
+                with self.assertRaises(ValueError):
+                    Project(slug="example", context_dir=value)
+        default = Settings(context_root=context_root, projects=[Project(slug="example")])
+        self.assertEqual(default.project_root("example"), context_root / "workspaces/example")
+
     def test_explicit_source_registration_and_additive_defaults(self) -> None:
         source = self.root / "canonical.md"
         source.write_text("Canonical project instructions.\n")

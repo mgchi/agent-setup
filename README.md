@@ -129,6 +129,11 @@ used only by the disclosure scanner. Neither field uploads files or grants a
 worker access to them. Both reject symlinked paths. The runtime does not rewrite
 external canonical files; use the project's existing reviewed update workflow.
 
+To keep an existing project digest where it is, set that project's `context_dir`
+to an existing directory inside the context root. Loading, the decision outbox,
+and refresh then use it in place of `workspaces/<slug>`, and the disclosure
+scanner indexes it.
+
 Packets expose full-byte source hashes and explicitly name omitted or shortened
 sources. Read required source material when an excerpt is insufficient. After
 updating an authoritative source, run `agent-context refresh --run <id>` and read

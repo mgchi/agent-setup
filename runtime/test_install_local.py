@@ -135,6 +135,30 @@ class InstallTests(unittest.TestCase):
             install(self.home)
         self.assertEqual(os.readlink(alias), 'unrelated-target')
 
+    def test_client_links_to_shared_instructions_get_one_section(self) -> None:
+        for relative in ('.codex/AGENTS.md', '.claude/CLAUDE.md'):
+            path = self.home / relative
+            path.unlink()
+            path.symlink_to('../.agents/AGENTS.md')
+        install(self.home)
+        self.assertEqual(install(self.home).changed_files, [])
+        text = self.global_file.read_text()
+        self.assertIn('Keep my existing rules.', text)
+        self.assertEqual(text.count('<!-- agent-context-workflow:start -->'), 1)
+        for relative in ('.codex/AGENTS.md', '.claude/CLAUDE.md'):
+            self.assertEqual(os.readlink(self.home / relative), '../.agents/AGENTS.md')
+
+    def test_instruction_link_outside_managed_files_is_refused(self) -> None:
+        target = self.home / 'other-instructions.md'
+        atomic_text(target, 'Unrelated rules.\n')
+        link = self.home / '.claude/CLAUDE.md'
+        link.unlink()
+        link.symlink_to(target)
+        with self.assertRaises(ValueError):
+            install(self.home)
+        self.assertEqual(target.read_text(), 'Unrelated rules.\n')
+        self.assertNotIn('agent-context-workflow', self.global_file.read_text())
+
     def test_partial_write_failure_restores_content_and_modes(self) -> None:
         self.claude.chmod(0o640)
         before = {filename: (filename.read_bytes(), filename.stat().st_mode & 0o777)

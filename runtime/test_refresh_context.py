@@ -299,6 +299,14 @@ class RefreshTests(unittest.TestCase):
                     self.assertEqual(main(), 1)
                 run.assert_not_called()
 
+    def test_refresh_publishes_into_the_project_context_dir(self) -> None:
+        settings = self.base / "settings.json"
+        save_model(settings, Settings(context_root=self.root, projects=[Project(slug="example", context_dir=self.root)],
+                                      refresh=RefreshSettings(enabled=True, project="example", resource_root=self.tools)))
+        with patch("sys.argv", ["refresh-context", "--settings", str(settings)]), patch("refresh_context.refresh") as run:
+            self.assertEqual(main(), 0)
+        self.assertEqual(run.call_args.args[0], self.root)
+
     def test_stage_validation_requires_registered_project_when_refresh_disabled(self) -> None:
         for target in (None, "unregistered"):
             with self.subTest(target=target):

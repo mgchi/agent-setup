@@ -5,7 +5,7 @@ description: "Retrieve private project context selectively and verify linked sou
 
 # Project context
 
-Run `agent-context load --cwd "$PWD" --prompt <topic>` to resolve the registered project and retrieve relevant context. Each project's context lives at `{{CONTEXT_ROOT}}/workspaces/<slug>/`. Read that project's `brief.md` when it exists, then retrieve only the relevant topic, person, decision, or meeting. Git worktrees share their registered project's context. Follow the linked authoritative sources before acting on changing facts. Distinguish verified current behavior from proposals and unresolved questions.
+Run `agent-context load --cwd "$PWD" --prompt <topic>` to resolve the registered project and retrieve relevant context. Each project's context lives at its registered `context_dir`, or at `{{CONTEXT_ROOT}}/workspaces/<slug>/` by default. Read that project's `brief.md` when it exists, then retrieve only the relevant topic, person, decision, or meeting. Git worktrees share their registered project's context. Follow the linked authoritative sources before acting on changing facts. Distinguish verified current behavior from proposals and unresolved questions.
 
 Search each relevant connected source with its supported connector. Follow the active client's repository guidance for tools and delegation. Do not assume access to a service or infer that missing search results prove absence. Keep the working set small; avoid loading the entire context tree.
 

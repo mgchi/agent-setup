@@ -69,6 +69,15 @@ class DisclosureTests(unittest.TestCase):
                     build_index(self.root).scan(text)
                 path.unlink()
 
+    def test_configured_context_directories_are_indexed(self) -> None:
+        path = self.root / "team/projects/topic.md"
+        path.parent.mkdir(parents=True)
+        text = " ".join(f"teamrecord{number:03d}" for number in range(48))
+        path.write_text(text)
+        build_index(self.root).scan(text)
+        with self.assertRaisesRegex(DisclosureError, "private-context|private-file"):
+            build_index(self.root, context_dirs=[self.root / "team"]).scan(text)
+
     def test_symlinked_workspace_container_is_rejected(self) -> None:
         destination = self.root / "external"
         destination.mkdir()

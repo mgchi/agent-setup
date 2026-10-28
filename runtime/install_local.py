@@ -156,6 +156,12 @@ def table_at(document: TOMLDocument | Table, key: str) -> Table:
     return value
 
 
+def shared_instruction_link(path: Path, canonical: list[Path]) -> bool:
+    # A client file that links to another managed instruction file shares its section.
+    return (path.is_symlink() and not linked_path(path.parent)
+            and path.resolve() in {target.resolve() for target in canonical})
+
+
 def merge_hooks(document: JsonDocument, client: Literal['claude', 'codex'], cli: Path) -> JsonDocument:
     result = document.model_copy(deep=True)
     hooks = result.root.setdefault('hooks', {})
@@ -226,8 +232,11 @@ def build_plan(home: Path) -> InstallPlan:
     prompts['general'] = managed_section(original_prompt, 'agent-context-workflow', template('conductor-prompt.txt', home, context_root))
     files.append(FileWrite(path=conductor_path, text=tomlkit.dumps(conductor)))
 
-    for relative in ('.agents/AGENTS.md', '.codex/AGENTS.md', '.claude/CLAUDE.md'):
-        global_path = home / relative
+    instruction_paths = [home / relative for relative in ('.agents/AGENTS.md', '.codex/AGENTS.md', '.claude/CLAUDE.md')]
+    canonical_instructions = [path for path in instruction_paths if not linked_path(path)]
+    for global_path in instruction_paths:
+        if shared_instruction_link(global_path, canonical_instructions):
+            continue
         global_text = managed_section(existing_text(global_path), 'agent-context-workflow', template('global-instructions.txt', home, context_root))
         files.append(FileWrite(path=global_path, text=global_text))
     skill_path = home / '.claude/skills/context-workflow/SKILL.md'
