@@ -95,10 +95,12 @@ lessons. Workers are tool-free and cannot authorize actions. They receive
 sanitized task, candidate, and evidence text. Failed or pending advice does not
 block completion after the bounded wait.
 
-Adviser defaults are `claude-fable-5-1` and `gpt-6-astra` at maximum effort. Change
+Adviser defaults are `claude-fable-5-2` and `gpt-6-astra` at maximum effort. Change
 them in `~/.config/agent-context/settings.json` to models your accounts support.
-Both advisers can incur provider usage charges. A missing model or exhausted
-provider does not prevent the lead from finishing.
+The first installation writes the defaults to that file, so an existing
+installation keeps its saved models until you edit them. `claude-fable-5-2` needs
+Claude Code 2.1.290 or newer. Both advisers can incur provider usage charges. A
+missing model or exhausted provider does not prevent the lead from finishing.
 
 Registered Git worktrees share project context. Separate projects and nested
 repositories remain isolated. Advisers are disabled for unregistered projects

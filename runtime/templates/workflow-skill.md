@@ -15,7 +15,7 @@ Workers marked `AGENT_CONTEXT_WORKER=1` or `AGENT_CONTEXT_REFRESH=1` skip entry,
 
 ## Collaboration
 
-The lead owns all edits, tool calls, validation, and the final answer. Registered projects use independent Claude Fable 5.1 and GPT-6 Astra advisers at max effort by default. These workers are tool-free and cannot authorize an action. Preserve the lead's selected model and effort.
+The lead owns all edits, tool calls, validation, and the final answer. Registered projects use independent Claude Fable 5.2 and GPT-6 Astra advisers at max effort by default. These workers are tool-free and cannot authorize an action. Preserve the lead's selected model and effort.
 
 Send only a sanitized task, candidate answer, and narrowly selected evidence. Never send a project-context packet, credentials, private customer or employee details, or raw transcripts. If a safe independent question cannot be constructed, continue without advisers and state the limitation briefly.
 
