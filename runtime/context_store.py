@@ -102,7 +102,7 @@ class RefreshSettings(BaseModel):
 
 def default_providers() -> list[Provider]:
     return [
-        Provider(name="claude", command=("claude",), model="claude-fable-5-1", effort="max"),
+        Provider(name="claude", command=("claude",), model="claude-fable-5-2", effort="max"),
         Provider(name="codex", command=("codex",), model="gpt-6-astra", effort="max"),
     ]
 

@@ -38,7 +38,7 @@ need separate validation. The installer uses Python 3.14 and pinned dependencies
 How it works
 
 Entry hooks load a small personal and project context packet. The lead owns edits
-and validation. Independent adviser defaults are claude-fable-5-1 and gpt-6-astra
+and validation. Independent adviser defaults are claude-fable-5-2 and gpt-6-astra
 at maximum effort. These are configurable and depend on your account's access.
 Workers receive sanitized task, candidate, and evidence text. Bounded waits and
 graceful handling of failures and usage limits let the lead continue. Claude
