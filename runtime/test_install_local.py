@@ -238,7 +238,7 @@ class InstallTests(unittest.TestCase):
 
     def test_import_preserves_existing_cooldown(self) -> None:
         store = Store(self.settings)
-        cooldown = Cooldown(identity='claude:claude-fable-5-1:max', kind='quota', detail='Current quota limit', until=time.time() + 1000)
+        cooldown = Cooldown(identity='claude:claude-fable-5-2:max', kind='quota', detail='Current quota limit', until=time.time() + 1000)
         with store.connection() as connection:
             connection.execute('INSERT INTO cooldown VALUES (?, ?, ?)', (cooldown.identity, cooldown.until, cooldown.model_dump_json()))
         seed = self.seed.model_copy(update={'cooldowns': [cooldown.model_copy(update={'kind': 'account-policy', 'until': time.time() + 10})]})
