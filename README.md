@@ -106,6 +106,40 @@ Registered Git worktrees share project context. Separate projects and nested
 repositories remain isolated. Advisers are disabled for unregistered projects
 unless you explicitly enable a personal override.
 
+To start with context alone, or change an existing project's automatic advice:
+
+```sh
+agent-context project add my-project /absolute/path/to/project --advisers off
+```
+
+Use `--advisers on` to enable automatic advice. Omitting the option preserves an
+existing registration's choice; new registrations retain the existing default
+of enabled advisers. A task can still explicitly request `team: both` or disable
+advice with `team: off`. Context-only operation still loads context, applies tool
+guards, and supports checkpoints.
+
+### Which sessions are covered?
+
+The installer puts hooks in user-level Claude and Codex configuration. Normal
+local sessions using that configuration can run the workflow in a terminal or
+Conductor. Conductor's prompt is additional guidance, not the mechanism that
+makes terminal sessions work.
+
+Installation alone does not prove execution. Codex hook trust must be approved;
+client versions, configuration roots, command-line options, and local policy
+can affect which hooks load. Minimal/safe modes that disable customizations,
+worker sessions that suppress recursion, and clients that ignore user settings
+do not provide the same coverage. Other computers and cloud environments need
+their own installation and project registrations.
+
+Check for a fresh run receipt from an actual session. `project list` shows the
+registered projects; `status --cwd /path/to/repository` reports the selected
+scope. `personal` means that no project context was selected. Registration
+creates starter files; it does not research the repository or maintain its
+product knowledge automatically. Link to existing authoritative documents and
+keep those documents current. Scheduled cleanup bounds storage; optional source
+refresh is a separate workflow.
+
 ### Where things live
 
 | Location | Purpose |
@@ -283,6 +317,39 @@ isolated checks as CI:
 This command uses a temporary destination and leaves your installed context
 setup alone. It runs the unit suite and verifies that a second installation
 changes no managed files.
+
+### Measure context and advice
+
+`runtime/evaluate_context.py` is an opt-in, synthetic decision pilot. It compares
+task-only input, manually supplied facts, runtime-loaded facts, and the same
+runtime candidate after independent advice. It uses fictional context in a
+temporary store and reads only provider definitions from the settings file.
+It never retrieves your personal or project context.
+
+```sh
+~/.local/share/agent-context/.venv/bin/python runtime/evaluate_context.py \
+  --live --trials 2 --output .context/context-pilot.json
+```
+
+This makes up to 20 model calls with two trials and may consume paid usage. Models
+and effort come from your configuration. Answer keys stay outside the prompts;
+missing-information abstentions are separate from errors. The report includes
+provider failures, requested and observed model identifiers, and elapsed time.
+Blank observed identifiers mean the serving model was not verified. Billed cost
+is not measured. The advice condition reports the initial answer plus review and
+revision time, with the additional time recorded separately.
+
+This small pilot checks supplied-context decisions, including stale facts,
+untrusted quoted text, a missing contract, and self-contained code defects.
+It does not establish production coding quality, long-term memory usefulness,
+or a causal advantage over native tools. The manual-context condition helps
+separate the benefit of available facts from the runtime's packaging. Broader
+evaluation should use repeated real tasks, held-out checks, user corrections,
+adviser defect catches, total usage, and time to an accepted result. Unit tests
+validate the evaluator without contacting providers.
+
+The [initial pilot observations](experiments/context-pilot.md) document both
+successful cases and an unavailable batch, with the limits of the comparison.
 
 Ideas and questions belong in [Discussions](https://github.com/mgchi/agent-setup/discussions).
 Report reproducible bugs through [Issues](https://github.com/mgchi/agent-setup/issues/new/choose).

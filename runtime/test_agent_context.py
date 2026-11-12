@@ -304,6 +304,22 @@ class ProjectTests(unittest.TestCase):
         self.assertTrue((context_root / 'inbox.md').exists())
         self.assertFalse((context_root / 'workspaces').exists())
 
+    def test_registration_can_explicitly_select_context_only_or_advice(self) -> None:
+        project = add_project(self.settings_path, 'example', self.repo, advisers=False)
+        self.assertFalse(project.advisers)
+        self.assertFalse(add_project(self.settings_path, 'example', self.repo).advisers)
+        self.assertTrue(add_project(self.settings_path, 'example', self.repo, advisers=True).advisers)
+
+    def test_registration_default_and_new_root_preserve_adviser_policy(self) -> None:
+        self.assertTrue(add_project(self.settings_path, 'example', self.repo).advisers)
+        add_project(self.settings_path, 'example', self.repo, advisers=False)
+        other = self.root / 'another clone'
+        other.mkdir()
+        self.git(other, 'init', '-q')
+        project = add_project(self.settings_path, 'example', other)
+        self.assertFalse(project.advisers)
+        self.assertEqual(project.roots, [self.repo, other])
+
     def test_nested_and_unregistered_repositories_stay_isolated(self) -> None:
         add_project(self.settings_path, 'example', self.repo)
         nested = self.repo / 'unrelated'

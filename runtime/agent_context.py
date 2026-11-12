@@ -107,7 +107,7 @@ class ProjectList(BaseModel):
     projects: list[Project]
 
 
-def add_project(settings_path: Path, slug: str, path: Path) -> Project:
+def add_project(settings_path: Path, slug: str, path: Path, *, advisers: bool | None = None) -> Project:
     path = path.expanduser()
     if linked_path(path) or not path.is_dir():
         raise ValueError("Choose an existing project directory without symlinks.")
@@ -123,6 +123,8 @@ def add_project(settings_path: Path, slug: str, path: Path) -> Project:
             registration = Project.model_validate({**current.model_dump(),
                 "roots": [*current.roots, *registration.roots],
                 "common_dirs": [*current.common_dirs, *registration.common_dirs]})
+        if advisers is not None:
+            registration = registration.model_copy(update={"advisers": advisers})
         projects = [project for project in settings.projects if project.slug != slug]
         updated = Settings.model_validate({**settings.model_dump(), 'projects': [*projects, registration]})
         root = updated.project_root(slug)
@@ -775,6 +777,7 @@ def parser() -> argparse.ArgumentParser:
     add = project_commands.add_parser('add')
     add.add_argument('slug')
     add.add_argument('path', type=Path)
+    add.add_argument('--advisers', choices=['on', 'off'], help='Set automatic advice for this project; omission preserves the existing choice.')
     project_commands.add_parser('list')
     migration = commands.add_parser('migrate')
     migration.add_argument('manifest', type=Path, nargs='?')
@@ -836,7 +839,8 @@ def main() -> int:
             print(json.dumps(migration_result, indent=2))
             return 0
         if options.command == 'project':
-            result = (add_project(options.settings, options.slug, options.path)
+            result = (add_project(options.settings, options.slug, options.path,
+                                 advisers=None if options.advisers is None else options.advisers == 'on')
                       if options.project_command == 'add'
                       else ProjectList(projects=load_settings(options.settings).projects))
             print(result.model_dump_json(indent=2))
