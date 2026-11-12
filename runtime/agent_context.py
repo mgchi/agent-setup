@@ -337,7 +337,7 @@ def receipt(store: Store, run_id: str, *, packet: Packet | None = None,
                    assessment=phase_state(store, run_id, "assessment", run.prompt_hash),
                    review=review_result,
                    instruction=f"Lead alone edits. Collect advice with {cli_command(settings_path)} collect --run {run_id}. "
-                   f"Stage a sanitized request, candidate answer, and evidence under {store.local}. "
+                   f"Stage a sanitized request, candidate answer, and evidence under {directory / 'task-inputs'}. "
                    f"Review once with --request-file and one --wait 50, then checkpoint durable memory or --none. "
                    f"Send only sanitized task details to advisers. Pending advice does not require another wait. "
                    f"Collaborator failure permits continuing with the lead; never change authentication or retention to repair it.")

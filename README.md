@@ -214,6 +214,16 @@ not make hosted inference local. Adviser prompts are sanitized, and tool guards
 reduce accidental disclosure, but neither guarantees confidentiality. Review
 outgoing tool inputs, files, issues, pull requests, and messages.
 
+Run review inputs belong in `<context-root>/local/runs/<run-id>/task-inputs/`.
+After capture, prefer a deletion-only patch to remove those individual regular
+files. A bare `rm -- <files>` is also supported, subject to the client's command
+policy. Directory listings stay local; recursive cleanup,
+globs, mixed public/private patches and deletion of canonical context are not
+exempted. Shell pipelines, redirects and substitutions do not gain a private
+operation exemption. Symlinked executables in simple commands are resolved and
+scanned; symlinked attachments remain blocked. The exact system null device is
+recognized as an empty sink, without exempting private uploads or other devices.
+
 Keep credentials out of memory. Keep private context, transcripts, captures,
 databases, backups, and machine configuration out of this repository. Provider
 data retention and account policies still apply to temporary adviser sessions.

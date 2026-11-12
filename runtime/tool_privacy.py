@@ -4,8 +4,10 @@ import base64
 import binascii
 import html
 import json
+import os
 import re
 import shlex
+import stat
 import subprocess
 import tempfile
 import time
@@ -93,6 +95,39 @@ def shell_words(command: str) -> list[str]:
         raise DisclosureError('unparsed-command') from None
 
 
+def temporary_input(path: Path, index: DisclosureIndex) -> bool:
+    """Only disposable run inputs, never canonical context or run receipts."""
+    if linked(path):
+        return False
+    try:
+        parts = path.resolve().relative_to(index.root.resolve()).parts
+    except ValueError:
+        return False
+    return (len(parts) == 5 and parts[:2] == ('local', 'runs')
+            and re.fullmatch(r'run-[a-f0-9]{24}', parts[2]) is not None
+            and parts[3] == 'task-inputs' and path.parent.is_dir()
+            and (not path.exists() or stat.S_ISREG(path.stat().st_mode)))
+
+
+def local_arguments(words: list[str], options: str) -> list[str] | None:
+    """A small, nonrecursive option set; no expansion, wrappers or output flags."""
+    arguments: list[str] = []
+    operands = False
+    seen_operand = False
+    for word in words:
+        if not operands and word == '--':
+            operands = True
+        elif not operands and word.startswith('-'):
+            if seen_operand or len(word) < 2 or any(letter not in options for letter in word[1:]):
+                return None
+        else:
+            if any(character in word for character in '*?[]{}~'):
+                return None
+            arguments.append(word)
+            seen_operand = True
+    return arguments or None
+
+
 def private_command(command: str, cwd: Path, index: DisclosureIndex) -> bool:
     if SHELL_OPERATORS.search(command) or '$' in command:
         return False
@@ -100,6 +135,12 @@ def private_command(command: str, cwd: Path, index: DisclosureIndex) -> bool:
     if not words:
         return False
     executable = words[0]
+    if executable in {'rm', '/bin/rm', '/usr/bin/rm'}:
+        arguments = local_arguments(words[1:], 'f')
+        return arguments is not None and all(temporary_input(path_at(word, cwd), index) for word in arguments)
+    if executable in {'ls', '/bin/ls', '/usr/bin/ls'}:
+        arguments = local_arguments(words[1:], 'laAdh1t')
+        return arguments is not None and all(private(path_at(word, cwd), index) for word in arguments)
     cli = str(Path.home() / '.local/bin/agent-context')
     if executable in {'agent-context', cli} and len(words) > 1:
         offset = 1
@@ -156,11 +197,31 @@ def private_operation(index: DisclosureIndex, cwd: Path, tool: str, payload: Jso
     patch = payload.get('patch', payload.get('input', command))
     if name == 'apply_patch' and isinstance(patch, str):
         targets = [first or second for first, second in PATCH_PATH.findall(patch)]
+        if '*** Delete File:' in patch:
+            # Deletion is local cleanup, not an attachment. Mixed patches and
+            # deletion outside the dedicated scratch directory stay guarded.
+            return (len(payload) == 1 and bool(targets)
+                    and re.fullmatch(r'\*\*\* Begin Patch\n(?:\*\*\* Delete File: [^\n]+\n)+\*\*\* End Patch\n?', patch) is not None
+                    and all(temporary_input(path_at(value, cwd), index) for value in targets))
         return bool(targets) and '*** Delete File:' not in patch and all(private(path_at(value, cwd), index) for value in targets)
     return False
 
 
-def references(texts: list[str], cwd: Path) -> set[Path]:
+def executable_reference(cwd: Path, tool: str, payload: JsonValue) -> Path | None:
+    """Identify only an explicit executable in a single, unexpanded command."""
+    if not isinstance(payload, dict) or tool.lower().split('__')[-1].split('.')[-1] not in {'bash', 'exec_command', 'shell_command'}:
+        return None
+    command = payload.get('command', payload.get('cmd'))
+    if not isinstance(command, str) or SHELL_OPERATORS.search(command) or '$' in command:
+        return None
+    words = shell_words(command)
+    if not words or '/' not in words[0]:
+        return None
+    path = path_at(words[0], cwd)
+    return path if path.is_file() and path.stat().st_mode & 0o111 else None
+
+
+def references(texts: list[str], cwd: Path, index: DisclosureIndex | None = None) -> set[Path]:
     paths: set[Path] = set()
     for text in texts:
         candidates = [match.group(1).rstrip(',') for match in PATHS.finditer(text)]
@@ -189,7 +250,9 @@ def references(texts: list[str], cwd: Path) -> set[Path]:
                 continue
             try:
                 path = path_at(candidate, cwd)
-                if path.exists() or path.is_symlink():
+                # A private glob or not-yet-created file is still a private
+                # reference; existence must not turn a denied command public.
+                if path.exists() or path.is_symlink() or (index is not None and private(path, index)):
                     paths.add(path)
             except (OSError, RuntimeError, ValueError):
                 continue
@@ -389,10 +452,19 @@ def guard(index: DisclosureIndex, cwd: Path, tool_name: str, tool_input: JsonVal
             return ''
         for text in texts:
             index.scan(text)
-        for path in references(texts, cwd):
+        executable = executable_reference(cwd, tool_name, tool_input)
+        for path in references(texts, cwd, index):
+            # Interpreter and package-manager launchers are commonly symlinked.
+            # Resolve and scan this one executable, not attachment arguments.
+            if path == executable and linked(path):
+                path = path.resolve(strict=True)
             if private(path, index):
                 raise DisclosureError('private-path-egress')
             if path.is_dir() and not linked(path):
+                continue
+            # The platform's exact null device cannot contain an attachment.
+            # Do not follow aliases or exempt other devices, FIFOs or sockets.
+            if path == Path(os.devnull) and not linked(path) and stat.S_ISCHR(path.stat().st_mode):
                 continue
             regular(path)
             scanner = RawScanner(index)
