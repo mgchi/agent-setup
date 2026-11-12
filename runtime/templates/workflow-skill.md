@@ -19,13 +19,34 @@ The lead owns all edits, tool calls, validation, and the final answer. Registere
 
 Send only a sanitized task, candidate answer, and narrowly selected evidence. Never send a project-context packet, credentials, private customer or employee details, or raw transcripts. If a safe independent question cannot be constructed, continue without advisers and state the limitation briefly.
 
+Once the run ID exists, stage disposable request, answer and evidence files in `{{CONTEXT_ROOT}}/local/runs/<run-id>/task-inputs/`. After capture, prefer a deletion-only patch naming those individual files. A bare `rm -- <files>` is also supported where the client's command policy permits it. Do not use forced or recursive cleanup, globs, pipelines or mixed public/private patches. Canonical context and run receipts stay protected.
+
 Use `agent-context review --run <id> --answer-file <private-file> --request-file <private-file> --evidence <private-file> --wait 40`. Run commands that name private files bare: a pipe, redirect, or variable makes the privacy guard treat those paths as outgoing data. Reconcile any available advice against evidence. Use at most one bounded wait, capped at 50 seconds. Credit limits, usage errors, timeouts, and pending advice permit the lead to finish. Projects configured with `collaboration: "exchange"` run one reciprocal assessment round; preserve accepted independent findings if an exchange fails. The lead owns synthesis. Inspect `agent-context status` for diagnostics; do not keep retrying a cooling-down provider.
 
 ## Completion and memory
 
+First reconcile material changes to canonical knowledge: update the existing
+topic and compact current brief with verified sources, keep proposals distinct
+from accepted decisions, and preserve superseded evidence in history. Routine
+work may explicitly record no knowledge change. Do not create a second narrative
+in derived memory. Inspect `status` for stale sources, packet omissions and
+checkout drift; update a configured `knowledge_revision` only after reconciliation.
+Registered `topic_dirs` discover relevant new Markdown records. A topic marked
+`Context-Status: historical`, `superseded`, or `archived` stays on disk and leaves
+automatic retrieval. Optional memory `review_after` and `expires` timestamps
+bound time-sensitive claims. Retirement reconciles runtime-owned inbox entries;
+human-authored source prose still needs deliberate curation.
+
 Retain only explicit preferences, accepted decisions, and verified reusable lessons with their supporting evidence. Use the existing key when correcting a memory. Checkpoint with `agent-context checkpoint --run <id> --file <private-file>` using the CLI's schema, or `agent-context checkpoint --run <id> --none` when nothing durable changed. External context sources remain authoritative and are never rewritten by the runtime. Curate accepted changes there through the project's existing approved workflow; the local memory/outbox is a retrieval aid. If authoritative sources changed, run `agent-context refresh --run <id>`, read its current packet, then checkpoint. Run `agent-context finish --run <id>` against the final checkout. A changed checkout or source invalidates completion; start a new run to record the new revision. The outbox records project decisions once; do not duplicate an inbox entry manually.
 
 Context has fixed retrieval, memory, capture, run, artifact, and database budgets. Maintenance removes expired task material and consolidates retained context. Automatic hooks cover participating client sessions only. Durable memory requires explicit, evidence-backed checkpoints; arbitrary app activity and every conversation are not captured. Do not save whole conversations or speculative lessons. Remove temporary prompts, answers, and evidence after capture. A missing runtime permits manual selective context reads and append-once project decisions.
+
+An explicitly registered local adapter can run an existing canonical update
+helper through `agent-context adapter <name> <verb> <arguments...>`. Registration
+pins the standalone Python script's hash, project and verbs. Use the existing
+approved helper; never register arbitrary commands to evade a disclosure denial.
+Review changed helper code before updating its pin. This is trusted local code,
+not a sandbox or permission to publish private material.
 
 ## Privacy
 
