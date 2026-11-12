@@ -4,13 +4,14 @@ import argparse
 import concurrent.futures
 import json
 import math
+import os
 from pathlib import Path
 import random
 import tempfile
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from context_store import Project, Settings, Store, atomic_text
+from context_store import Project, Settings, Store, atomic_text, linked_path
 from team_runtime import Provider, invoke
 
 
@@ -204,10 +205,14 @@ def main() -> int:
     providers = [Provider.model_validate(p) for p in json.loads(args.settings.read_text())["providers"]]
     if len(providers) != 2 or {p.name for p in providers} != {"claude", "codex"}:
         parser.error("This paired pilot requires exactly one Claude and one Codex provider.")
-    report: dict[str, object] = {"version": 1, "scope": "synthetic supplied-context decision pilot", "trials": [],
+    report: dict[str, object] = {"version": 1, "status": "in_progress", "scope": "synthetic supplied-context decision pilot", "trials": [],
                                "limits": ["No repository editing or tools", "No production quality or cost claim", "Manual context contains the same facts as runtime context", "Task-only abstention is scored separately", "Advice is a continuation of the matched runtime candidate", "Elapsed time is measured; billed cost is not"]}
-    # Fail before paid calls if the report destination cannot be written.
-    atomic_text(args.output, json.dumps(report, indent=2) + "\n")
+    # Reserve a new report before paid calls; never replace an earlier run.
+    if linked_path(args.output):
+        raise ValueError("Report paths cannot traverse symlinks.")
+    args.output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with os.fdopen(os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as output:
+        output.write(json.dumps(report, indent=2) + "\n")
     for trial in range(args.trials):
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             futures = {pool.submit(run_trial, providers[index], providers[1-index], 41 + trial, args.timeout): providers[index]
@@ -225,7 +230,10 @@ def main() -> int:
                 atomic_text(args.output, json.dumps(report, indent=2) + "\n")
         if any(result.get("incomplete") for result in report["trials"]):
             break
-    return 0 if all(row["ok"] for trial in report["trials"] for row in trial["rows"]) else 1
+    complete = all(row["ok"] for trial in report["trials"] for row in trial["rows"])
+    report["status"] = "complete" if complete else "incomplete"
+    atomic_text(args.output, json.dumps(report, indent=2) + "\n")
+    return 0 if complete else 1
 
 
 if __name__ == "__main__":

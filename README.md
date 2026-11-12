@@ -392,7 +392,10 @@ It never retrieves your personal or project context.
   --live --trials 2 --output .context/context-pilot.json
 ```
 
-This makes up to 20 model calls with two trials and may consume paid usage. Models
+This makes up to 20 model calls with two trials and may consume paid usage: five
+calls per client per trial, with exactly two clients. Choose a new output filename
+for each run; an existing report is never overwritten. Reports stay marked as
+in progress until the run finishes, and failed runs are marked incomplete. Models
 and effort come from your configuration. Answer keys stay outside the prompts;
 missing-information abstentions are separate from errors. The report includes
 provider failures, requested and observed model identifiers, and elapsed time.

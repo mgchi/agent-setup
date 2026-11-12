@@ -148,6 +148,7 @@ class EvaluationTests(TestCase):
 
             def run(lead, peer, seed, timeout):
                 self.assertTrue(report.exists())
+                self.assertEqual(json.loads(report.read_text())['status'], 'in_progress')
                 if lead.name == 'claude':
                     raise ValueError('Do not expose this error text')
                 return {'lead': lead.name, 'seed': seed, 'rows': [{'ok': True}]}
@@ -157,5 +158,22 @@ class EvaluationTests(TestCase):
             self.assertEqual(trial.call_count, 2)
             saved = json.loads(report.read_text())
             self.assertEqual(len(saved['trials']), 2)
+            self.assertEqual(saved['status'], 'incomplete')
             self.assertEqual({t['lead'] for t in saved['trials']}, {'claude', 'codex'})
             self.assertNotIn('Do not expose', report.read_text())
+
+    def test_existing_report_survives_without_starting_paid_calls(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            settings = root / 'settings.json'
+            settings.write_text(json.dumps({'providers': [
+                {'name': name, 'command': ['unused'], 'model': 'example', 'effort': 'max'}
+                for name in ('claude', 'codex')]}))
+            report = root / 'report.json'
+            original = '{"important": "previous experiment"}\n'
+            report.write_text(original)
+            args = ['evaluate_context.py', '--live', '--settings', str(settings), '--output', str(report)]
+            with patch('sys.argv', args), patch('evaluate_context.run_trial') as trial, self.assertRaises(FileExistsError):
+                main()
+            trial.assert_not_called()
+            self.assertEqual(report.read_text(), original)
