@@ -70,6 +70,7 @@ class DisclosureIndex(BaseModel):
     source_files: list[Path] = Field(default_factory=list)
     words: set[str] = Field(default_factory=set)
     files: set[str] = Field(default_factory=set)
+    private_github_repositories: dict[str, str] = Field(default_factory=dict)
 
     def scan(self, text: str) -> None:
         scanner = RawScanner(self)

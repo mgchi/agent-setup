@@ -106,6 +106,40 @@ Registered Git worktrees share project context. Separate projects and nested
 repositories remain isolated. Advisers are disabled for unregistered projects
 unless you explicitly enable a personal override.
 
+To start with context alone, or change an existing project's automatic advice:
+
+```sh
+agent-context project add my-project /absolute/path/to/project --advisers off
+```
+
+Use `--advisers on` to enable automatic advice. Omitting the option preserves an
+existing registration's choice; new registrations retain the existing default
+of enabled advisers. A task can still explicitly request `team: both` or disable
+advice with `team: off`. Context-only operation still loads context, applies tool
+guards, and supports checkpoints.
+
+### Which sessions are covered?
+
+The installer puts hooks in user-level Claude and Codex configuration. Normal
+local sessions using that configuration can run the workflow in a terminal or
+Conductor. Conductor's prompt is additional guidance, not the mechanism that
+makes terminal sessions work.
+
+Installation alone does not prove execution. Codex hook trust must be approved;
+client versions, configuration roots, command-line options, and local policy
+can affect which hooks load. Minimal/safe modes that disable customizations,
+worker sessions that suppress recursion, and clients that ignore user settings
+do not provide the same coverage. Other computers and cloud environments need
+their own installation and project registrations.
+
+Check for a fresh run receipt from an actual session. `project list` shows the
+registered projects; `status --cwd /path/to/repository` reports the selected
+scope. `personal` means that no project context was selected. Registration
+creates starter files; it does not research the repository or maintain its
+product knowledge automatically. Link to existing authoritative documents and
+keep those documents current. Scheduled cleanup bounds storage; optional source
+refresh is a separate workflow.
+
 ### Where things live
 
 | Location | Purpose |
@@ -145,10 +179,61 @@ and untracked content. It does not attest remote synchronization, hosted checks,
 deployment, or resource cleanup. A changed finalized run needs a new checkpoint
 in a new run. Empty checkpoints use `checkpoint --run <id> --none`.
 
+Use `context_sources` for the small standing brief, and `topic_sources` or
+`topic_dirs` for explicit topic files or directories whose immediate Markdown
+children are searched only when relevant. New files in a selected topic directory
+are discovered automatically. At most two matching excerpts enter a packet;
+unregistered projects and personal scope cannot retrieve them. Mark a retired
+topic with `Context-Status: historical`, `superseded`, or `archived` to preserve it
+on disk while excluding it from automatic topic retrieval. Core source contents
+reserve room for later sources, including a short live brief.
+
+Optional `source_max_age_days` maps registered source paths to freshness limits.
+These measure file age, not truth. `knowledge_revision` records the product Git
+revision last reconciled with canonical knowledge; a different checkout produces
+a visible warning. Update it deliberately after reconciling current facts.
+`agent-context status` reports source ages, omissions, freshness warnings, memory
+kinds, review-due entries, retained runs/checkpoints, installation revision, and
+runtime file drift. Retained run counts are a bounded sample, not lifetime usage.
+
+Checkpoint memory drafts accept optional Unix timestamps `review_after` and
+`expires`. Review-due entries stay available for deliberate review but leave the
+automatic packet. Forgetting, expiry, replacement, and eviction also retire the
+runtime-owned entries in the generated inbox. Human-authored prose is preserved;
+the runtime never silently rewrites canonical decisions. Reconcile a material
+outcome into its existing topic and current brief, preserve old evidence in Git
+or history, and checkpoint only the supported reusable memory that remains.
+
+An adopted context directory may set `private_github_repository` to its exact
+`owner/repository` destination. Before checking or publishing its staged files,
+the guard verifies the canonical repository root, the sole `origin` remote and
+all resolved push URLs, and confirms private visibility through the authenticated
+`gh` CLI. Only this verified destination permits private context text; credentials
+remain forbidden. Unknown visibility, changed remotes and push URL overrides fail
+closed. This does not relax public-repository or arbitrary-upload checks.
+
+For an explicitly configured instruction-copy workflow, private settings may
+provide `instruction_sources` mapping output Markdown filenames to source files.
+`privacy --instruction-copies <private-local-directory>` exports only that bounded
+list after credential redaction and disclosure validation. It rejects private
+context sources and existing destinations; it is not a general file reader.
+
 Projects can set `collaboration` to `exchange` to request one reciprocal round
 after successful independent assessments. The lead synthesizes the result.
 Independent advice survives a failed exchange, and configured timeouts still
 apply. The default remains `advisory`.
+
+For an existing canonical update helper, private settings may register a
+`local_adapters` entry with a registered `project`, absolute standalone Python
+`script`, its `sha256`, and allowed `verbs`. Invoke it with
+`agent-context adapter <name> <verb> <arguments...>` from that project. The runtime
+checks project scope, the verb, file type and current hash before running the
+helper through its isolated Python interpreter, with a two-minute timeout and
+the helper's exit status. Changed scripts require deliberate review and a new
+pin. Adapters are trusted local code with the lead's permissions, not a sandbox;
+review their arguments and behavior before registration. They reuse an existing
+canonical workflow without creating another context store or exempting arbitrary
+shell commands from disclosure checks.
 
 Hooks cover participating client sessions. They prompt the lead to save explicit
 preferences, accepted decisions and verified lessons; they do not retain every
@@ -162,6 +247,16 @@ refresh remain separate from bounded local memory.
 not make hosted inference local. Adviser prompts are sanitized, and tool guards
 reduce accidental disclosure, but neither guarantees confidentiality. Review
 outgoing tool inputs, files, issues, pull requests, and messages.
+
+Run review inputs belong in `<context-root>/local/runs/<run-id>/task-inputs/`.
+After capture, prefer a deletion-only patch to remove those individual regular
+files. A bare `rm -- <files>` is also supported, subject to the client's command
+policy. Directory listings stay local; recursive cleanup,
+globs, mixed public/private patches and deletion of canonical context are not
+exempted. Shell pipelines, redirects and substitutions do not gain a private
+operation exemption. Symlinked executables in simple commands are resolved and
+scanned; symlinked attachments remain blocked. The exact system null device is
+recognized as an empty sink, without exempting private uploads or other devices.
 
 Keep credentials out of memory. Keep private context, transcripts, captures,
 databases, backups, and machine configuration out of this repository. Provider
@@ -283,6 +378,42 @@ isolated checks as CI:
 This command uses a temporary destination and leaves your installed context
 setup alone. It runs the unit suite and verifies that a second installation
 changes no managed files.
+
+### Measure context and advice
+
+`runtime/evaluate_context.py` is an opt-in, synthetic decision pilot. It compares
+task-only input, manually supplied facts, runtime-loaded facts, and the same
+runtime candidate after independent advice. It uses fictional context in a
+temporary store and reads only provider definitions from the settings file.
+It never retrieves your personal or project context.
+
+```sh
+~/.local/share/agent-context/.venv/bin/python runtime/evaluate_context.py \
+  --live --trials 2 --output .context/context-pilot.json
+```
+
+This makes up to 20 model calls with two trials and may consume paid usage: five
+calls per client per trial, with exactly two clients. Choose a new output filename
+for each run; an existing report is never overwritten. Reports stay marked as
+in progress until the run finishes, and failed runs are marked incomplete. Models
+and effort come from your configuration. Answer keys stay outside the prompts;
+missing-information abstentions are separate from errors. The report includes
+provider failures, requested and observed model identifiers, and elapsed time.
+Blank observed identifiers mean the serving model was not verified. Billed cost
+is not measured. The advice condition reports the initial answer plus review and
+revision time, with the additional time recorded separately.
+
+This small pilot checks supplied-context decisions, including stale facts,
+untrusted quoted text, a missing contract, and self-contained code defects.
+It does not establish production coding quality, long-term memory usefulness,
+or a causal advantage over native tools. The manual-context condition helps
+separate the benefit of available facts from the runtime's packaging. Broader
+evaluation should use repeated real tasks, held-out checks, user corrections,
+adviser defect catches, total usage, and time to an accepted result. Unit tests
+validate the evaluator without contacting providers.
+
+The [initial pilot observations](experiments/context-pilot.md) document both
+successful cases and an unavailable batch, with the limits of the comparison.
 
 Ideas and questions belong in [Discussions](https://github.com/mgchi/agent-setup/discussions).
 Report reproducible bugs through [Issues](https://github.com/mgchi/agent-setup/issues/new/choose).

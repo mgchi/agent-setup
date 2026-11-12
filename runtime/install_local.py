@@ -20,7 +20,7 @@ from pydantic import BaseModel, JsonValue, RootModel
 from tomlkit.items import Table
 from tomlkit.toml_document import TOMLDocument
 
-from context_store import Capture, Cooldown, Memory, Settings, Store, atomic_text, clean, direct_user_text, linked_path, lock, persist_memories, validate_memory_capture
+from context_store import Capture, Cooldown, Memory, Settings, Store, atomic_text, clean, digest, direct_user_text, linked_path, lock, persist_memories, validate_memory_capture
 
 HOME_DIR = Path.home()
 TEMPLATES = Path(__file__).parent / 'templates'
@@ -207,6 +207,12 @@ def build_plan(home: Path) -> InstallPlan:
     for source in sorted(TEMPLATES.iterdir()):
         if source.is_file():
             files.append(FileWrite(path=runtime / 'templates' / source.name, text=source.read_text()))
+    revision = subprocess.run(['git', '-C', str(TEMPLATES.parent), 'rev-parse', 'HEAD'], capture_output=True, text=True, timeout=5)
+    source_status = subprocess.run(['git', '-C', str(TEMPLATES.parent), 'status', '--porcelain'], capture_output=True, text=True, timeout=5)
+    manifest = {'revision': revision.stdout.strip() if revision.returncode == 0 else '',
+                'source_dirty': bool(source_status.stdout.strip()),
+                'files': {str(write.path.relative_to(runtime)): digest(write.text) for write in files if write.path.is_relative_to(runtime)}}
+    files.append(FileWrite(path=runtime / 'installation.json', text=json.dumps(manifest, indent=2) + '\n'))
     launcher = ('#!/bin/sh\nset -eu\numask 077\n'
                 f'exec {shlex.quote(str(runtime / ".venv/bin/python"))} {shlex.quote(str(runtime / "agent_context.py"))} --settings {shlex.quote(str(config_path))} "$@"\n')
     files.append(FileWrite(path=cli, text=launcher, mode=0o700))
