@@ -201,7 +201,7 @@ def orchestration_excluded(settings: Settings, cwd: Path) -> bool:
 
 
 def select_providers(settings: Settings, scope: str, prompt: str) -> list[Provider]:
-    directive = direct_user_text(prompt)
+    directive = direct_user_text(prompt, complete=True)
     choices = re.findall(r"(?im)^team:\s*(off|on|both|claude|codex)\s*$", directive)
     project = next((item for item in settings.projects if item.slug == scope), None)
     enabled = project.advisers if project else False

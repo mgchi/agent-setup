@@ -317,6 +317,9 @@ _SENSITIVE_PATH = re.compile(
 _STOP_WORDS = set("the and that this with from what when where which have want need work about into then they them your will should could would does please context".split())
 _RUN_NAME = re.compile(r"^(?:run-[a-f0-9]{24}|smoke-[0-9]+)$")
 _MEMORY_LINE = re.compile(r"^.*<!-- agent-memory:[a-f0-9]{64} -->\s*$", re.MULTILINE)
+CAPTURE_CHARS = 24000
+_TAG_START = re.compile(r"<(\/?)([A-Za-z][\w-]*)\b")
+_CLOSING_TAG = re.compile(r"<[\s\\]*/\s*([A-Za-z][\w-]*)\b")
 
 
 def clean(text: str, limit: int = 32000) -> str:
@@ -457,13 +460,24 @@ def terms(query: str) -> set[str]:
     return {word for word in re.findall(r"[a-z0-9][a-z0-9_-]{2,}", query.lower()) if word not in _STOP_WORDS}
 
 
-def direct_user_text(prompt: str) -> str:
-    """Keep unquoted top-level prose for literal evidence checks."""
+def direct_user_text(prompt: str, *, complete: bool = False) -> str:
+    """Keep unquoted top-level prose for literal evidence checks.
+
+    Every opening tag quotes what follows. With `complete=True`, an opening tag that
+    no later closing tag names is ordinary text instead, so `Vec<String>`, a
+    placeholder, or a bare `<br>` quotes nothing. Leave it off for text that storage
+    may have cut or redacted, because the closing tag can be what was lost.
+    """
+    # Closing tags are found in the raw text and in loose spellings, so a fence, an escaped
+    # slash, a case change, or broken markup cannot hide one. Each name keeps its last position.
+    closing = {match.group(1).casefold(): match.start() for match in _CLOSING_TAG.finditer(prompt)}
     result: list[str] = []
     fence = ""
     tags: list[str] = []
     malformed = False
-    for raw in prompt.splitlines():
+    offset = 0
+    for raw in prompt.splitlines(keepends=True):
+        start, offset = offset, offset + len(raw)
         line = raw.strip()
         match = re.match(r"^(`{3,}|~{3,})", line)
         if match:
@@ -476,23 +490,38 @@ def direct_user_text(prompt: str) -> str:
             continue
         if fence:
             continue
-        markup = list(re.finditer(r"<(\/?)([A-Za-z][\w-]*)\b[^>]*>", line))
-        if markup:
-            for match in markup:
-                if match.group(1):
-                    if tags and tags[-1] == match.group(2):
-                        tags.pop()
-                    else:
-                        malformed = True
-                elif not match.group(0).endswith("/>"):
-                    tags.append(match.group(2))
-            result.append("")
-            continue
-        if tags or malformed or raw.startswith(("    ", "\t")) or line.startswith((">", '"', "'")):
+        quoted = False
+        position = end = 0
+        while match := _TAG_START.search(raw, position):
+            if end < match.end():
+                end = raw.find(">", match.end())
+            if end < 0:
+                break
+            closes, name = match.group(1), match.group(2)
+            opens = not closes and raw[end - 1] != "/"
+            if opens and complete and closing.get(name.casefold(), -1) < start + match.start():
+                position = match.start() + 1  # Ordinary text: a real tag may still begin inside it.
+                continue
+            position = end + 1
+            quoted = True
+            if closes:
+                if tags and tags[-1] == name:
+                    tags.pop()
+                else:
+                    malformed = True
+            elif opens:
+                tags.append(name)
+        if quoted or tags or malformed or raw.startswith(("    ", "\t")) or line.startswith((">", '"', "'")):
             result.append("")
             continue
         result.append(line)
     return "\n".join(result)
+
+
+def captured_user_text(capture: Capture) -> str:
+    """Read a stored prompt; the size limit or redaction may have removed a closing tag."""
+    complete = len(capture.prompt) < CAPTURE_CHARS and "[REDACTED]" not in capture.prompt
+    return direct_user_text(capture.prompt, complete=complete)
 
 
 def preference_evidence(evidence: str) -> bool:
@@ -521,7 +550,7 @@ def validate_memory_capture(memory: Memory, capture: Capture) -> None:
     if memory.kind in {"preference", "decision"}:
         if memory.source != f"session:{memory.run_id}":
             raise ValueError("User statements must cite their captured session.")
-        if memory.evidence not in direct_user_text(capture.prompt):
+        if memory.evidence not in captured_user_text(capture):
             raise ValueError("Evidence must be literal, unquoted text from the captured user prompt.")
         if memory.kind == "preference" and not (capture.preference_import or preference_evidence(memory.evidence)):
             raise ValueError("A preference requires an explicit user directive.")
@@ -622,7 +651,7 @@ class Store:
             connection.close()
 
     def scope(self, cwd: Path, query: str = "") -> Scope:
-        directive = direct_user_text(query)
+        directive = direct_user_text(query, complete=True)
         if re.search(r"(?im)^context:\s*personal\s*$", directive):
             return "personal"
         common = git(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"])
@@ -732,7 +761,7 @@ class Store:
         return [Memory.model_validate_json(row[0]) for row in rows]
 
     def capture(self, capture: Capture) -> None:
-        value = capture.model_copy(update={"prompt": clean(capture.prompt, 24000), "final": clean(capture.final, 8000)})
+        value = capture.model_copy(update={"prompt": clean(capture.prompt, CAPTURE_CHARS), "final": clean(capture.final, 8000)})
         with self.connection() as connection:
             connection.execute("INSERT OR REPLACE INTO capture VALUES (?, ?, ?)", (value.run_id, value.created, value.model_dump_json()))
             connection.execute("DELETE FROM capture WHERE run_id IN (SELECT run_id FROM capture ORDER BY created DESC LIMIT -1 OFFSET ?)", (self.settings.max_capture,))
@@ -741,14 +770,14 @@ class Store:
         capture = self.captured(run_id)
         if not capture:
             return []
-        return [line for line in direct_user_text(capture.prompt).splitlines()
+        return [line for line in captured_user_text(capture).splitlines()
                 if 5 <= len(line) <= 500 and preference_evidence(line)][:10]
 
     def decision_candidates(self, run_id: str) -> list[str]:
         capture = self.captured(run_id)
         if not capture:
             return []
-        return [line for line in direct_user_text(capture.prompt).splitlines()
+        return [line for line in captured_user_text(capture).splitlines()
                 if 5 <= len(line) <= 500 and decision_evidence(line)][:10]
 
     def set_session(self, session: Session) -> None:
