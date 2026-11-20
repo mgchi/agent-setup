@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from context_store import Capture, Memory, Packet, Project, Settings, Store, atomic_text, direct_user_text, git, lock
+from team_runtime import ADVISER_DEFAULTS, Provider, resolve_provider
 
 
 class ContextTests(unittest.TestCase):
@@ -38,6 +39,21 @@ class ContextTests(unittest.TestCase):
         self.assertEqual([m.text for m in self.store.memories("personal")], ["Keep answers brief."])
         self.store.remember(self.memory(key="duplicate", text="Keep answers brief."))
         self.assertEqual(len(self.store.memories("personal")), 1)
+
+    def test_default_stands_for_the_current_adviser_model_and_effort(self) -> None:
+        for name, default in ADVISER_DEFAULTS.items():
+            follows = resolve_provider(Provider(name=name, command=(name,), model="toolkit-default", effort="toolkit-default"))
+            self.assertEqual((follows.model, follows.effort), (default.model, default.effort))
+            pinned = resolve_provider(Provider(name=name, command=(name,), model="example-model", effort="toolkit-default"))
+            self.assertEqual((pinned.model, pinned.effort), ("example-model", default.effort))
+        saved = Settings.model_validate_json(Settings(context_root=self.root / "fresh").model_dump_json())
+        self.assertEqual([(item.name, item.model, item.effort) for item in saved.providers],
+                         [(name, "toolkit-default", "toolkit-default") for name in ADVISER_DEFAULTS])
+        other = Provider(name="other", command=("other",), model="toolkit-default", effort="max")
+        with self.assertRaises(ValueError):
+            resolve_provider(other)
+        with self.assertRaises(ValueError):
+            Settings(context_root=self.root / "fresh", providers=[other])
 
     def test_generated_inbox_cannot_bypass_memory_relevance(self) -> None:
         self.store.remember(self.memory(key="editor", kind="decision", scope="example",

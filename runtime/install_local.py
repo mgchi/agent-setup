@@ -20,6 +20,7 @@ from pydantic import BaseModel, JsonValue, RootModel
 from tomlkit.items import Table
 from tomlkit.toml_document import TOMLDocument
 
+from team_runtime import ADVISER_DEFAULTS, FOLLOW_DEFAULT
 from context_store import CAPTURE_CHARS, Capture, Cooldown, Memory, Settings, Store, atomic_text, captured_user_text, clean, digest, linked_path, lock, persist_memories, validate_memory_capture
 
 HOME_DIR = Path.home()
@@ -74,6 +75,7 @@ class InstallResult(BaseModel):
     changed_files: list[str]
     imported_preferences: int
     maintenance: str
+    notes: list[str] = []
 
 
 class ImportReceipt(BaseModel):
@@ -343,6 +345,17 @@ def import_preferences(store: Store, marker: Path, seed: PreferenceSeed | None) 
     return imported
 
 
+def adviser_notes(settings: Settings) -> list[str]:
+    """Say which saved adviser models no longer match the toolkit defaults."""
+    notes: list[str] = []
+    for provider in settings.providers:
+        default = ADVISER_DEFAULTS.get(provider.name)
+        if default and provider.model not in (FOLLOW_DEFAULT, default.model):
+            notes.append(f'The {provider.name} adviser is pinned to {provider.model}; the default is now {default.model}. '
+                         f'Run "agent-context adviser reset {provider.name}" to follow defaults.')
+    return notes
+
+
 def maintenance_command(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(['/bin/launchctl', *args], capture_output=True, text=True, timeout=10)
 
@@ -434,7 +447,8 @@ def install(home: Path = HOME_DIR, *, seed_path: Path | None = None, activate: b
             if activation_started:
                 restore_maintenance(home, previously_loaded)
             raise
-        return InstallResult(backup_directory=str(destination) if receipt else '', changed_files=[str(path) for path in paths], imported_preferences=imported, maintenance=maintenance)
+        return InstallResult(backup_directory=str(destination) if receipt else '', changed_files=[str(path) for path in paths],
+                             imported_preferences=imported, maintenance=maintenance, notes=adviser_notes(plan.settings))
 
 
 def main() -> None:
