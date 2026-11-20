@@ -255,6 +255,17 @@ class InstallTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'duplicate keys'):
             load_seed(self.seed_path)
 
+    def test_seed_check_matches_the_stored_prompt(self) -> None:
+        prompt = 'use Vec<String> here\nI prefer concise responses.\n'
+        atomic_text(self.seed_path, self.seed.model_copy(update={'prompt': prompt}).model_dump_json())
+        seed = load_seed(self.seed_path)
+        self.assertEqual(import_preferences(Store(self.settings), self.marker, seed), 1)
+        for lossy in (prompt + 'y' * (24000 - len(prompt)), prompt + 'sk-' + 'a' * 30):
+            with self.subTest(length=len(lossy)):
+                atomic_text(self.seed_path, self.seed.model_copy(update={'prompt': lossy}).model_dump_json())
+                with self.assertRaises(ValueError):
+                    load_seed(self.seed_path)
+
     def test_installed_skills_have_valid_names_and_quoted_descriptions(self) -> None:
         for name in ('context-workflow', 'project-context'):
             with self.subTest(name=name):

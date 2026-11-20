@@ -20,7 +20,7 @@ from pydantic import BaseModel, JsonValue, RootModel
 from tomlkit.items import Table
 from tomlkit.toml_document import TOMLDocument
 
-from context_store import Capture, Cooldown, Memory, Settings, Store, atomic_text, clean, digest, direct_user_text, linked_path, lock, persist_memories, validate_memory_capture
+from context_store import CAPTURE_CHARS, Capture, Cooldown, Memory, Settings, Store, atomic_text, captured_user_text, clean, digest, linked_path, lock, persist_memories, validate_memory_capture
 
 HOME_DIR = Path.home()
 TEMPLATES = Path(__file__).parent / 'templates'
@@ -296,13 +296,14 @@ def load_seed(path: Path | None) -> PreferenceSeed | None:
     if path is None:
         return None
     seed = PreferenceSeed.model_validate_json(existing_text(path))
-    if len(seed.prompt) > 24000:
+    if len(seed.prompt) > CAPTURE_CHARS:
         raise ValueError('Preference seed exceeds capture budget')
     keys = {(memory.scope, memory.key) for memory in seed.memories}
     if len(keys) != len(seed.memories):
         raise ValueError('Preference seed contains duplicate keys')
+    direct = captured_user_text(Capture(run_id='seed', prompt=clean(seed.prompt, CAPTURE_CHARS)))
     for memory in seed.memories:
-        if memory.kind != 'preference' or memory.evidence not in direct_user_text(seed.prompt):
+        if memory.kind != 'preference' or memory.evidence not in direct:
             raise ValueError('Imported preferences need literal user evidence')
     return seed
 
@@ -319,7 +320,7 @@ def import_preferences(store: Store, marker: Path, seed: PreferenceSeed | None) 
             receipt = ImportReceipt.model_validate_json(row[0])
         else:
             import_id = 'initial-preferences-' + uuid4().hex[:12]
-            capture = Capture(run_id=import_id, prompt=clean(seed.prompt, 24000), preference_import=True)
+            capture = Capture(run_id=import_id, prompt=clean(seed.prompt, CAPTURE_CHARS), preference_import=True)
             existing = [Memory.model_validate_json(row[0]) for row in connection.execute('SELECT payload FROM memory')]
             keys = {(memory.scope, memory.key) for memory in existing}
             contents = {(memory.scope, memory.kind, memory.text) for memory in existing}

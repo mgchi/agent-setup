@@ -161,6 +161,13 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(second, self.start(turn="turn-2"))
         self.assertNotEqual(second, self.start())
 
+    def test_team_directives_after_an_unclosed_tag_are_honored(self) -> None:
+        self.assertEqual(len(read_run(self.store, self.start(turn="default")).providers), 2)
+        run_id = self.start("Return Vec<String> from the parser.\nteam: off", turn="generic")
+        self.assertEqual(read_run(self.store, run_id).providers, [])
+        run_id = self.start("Render a <br> between rows.\nteam: codex\nteam-codex-effort: low", turn="break")
+        self.assertEqual([(item.name, item.effort) for item in read_run(self.store, run_id).providers], [("codex", "low")])
+
     def test_stop_continues_once_and_synthetic_reminder_is_not_evidence(self) -> None:
         run_id = self.start()
         self.spawner.reset_mock()
