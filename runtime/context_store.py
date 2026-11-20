@@ -19,7 +19,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
 
-from team_runtime import Provider, redact_text
+from team_runtime import ADVISER_DEFAULTS, FOLLOW_DEFAULT, Provider, redact_text, resolve_provider
 
 Scope = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$", max_length=48)]
 
@@ -143,10 +143,9 @@ class LocalAdapter(BaseModel):
 
 
 def default_providers() -> list[Provider]:
-    return [
-        Provider(name="claude", command=("claude",), model="claude-fable-5-2", effort="max"),
-        Provider(name="codex", command=("codex",), model="gpt-6-astra", effort="max"),
-    ]
+    # Saved as `toolkit-default`, so an installation that never chose a model follows later defaults.
+    return [Provider(name=name, command=(name,), model=FOLLOW_DEFAULT, effort=FOLLOW_DEFAULT)
+            for name in ADVISER_DEFAULTS]
 
 
 class Settings(BaseModel):
@@ -170,6 +169,13 @@ class Settings(BaseModel):
     core_memory_keys: list[str] = Field(default_factory=list)
     instruction_sources: dict[str, Path] = Field(default_factory=dict)
     local_adapters: dict[Scope, LocalAdapter] = Field(default_factory=dict, max_length=12)
+
+    @field_validator("providers")
+    @classmethod
+    def known_defaults(cls, values: list[Provider]) -> list[Provider]:
+        for provider in values:
+            resolve_provider(provider)  # Only a known adviser may follow the toolkit.
+        return values
 
     @field_validator("context_root")
     @classmethod

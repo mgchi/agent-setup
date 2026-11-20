@@ -38,8 +38,9 @@ need separate validation. The installer uses Python 3.14 and pinned dependencies
 How it works
 
 Entry hooks load a small personal and project context packet. The lead owns edits
-and validation. Independent adviser defaults are claude-fable-5-2 and gpt-6-astra
-at maximum effort. These are configurable and depend on your account's access.
+and validation. Independent advisers use the toolkit's default Claude and Codex
+models at maximum effort. agent-context adviser list shows them, adviser set
+chooses others your account supports, and adviser test checks that they work.
 Workers receive sanitized task, candidate, and evidence text. Bounded waits and
 graceful handling of failures and usage limits let the lead continue. Claude
 workers disable session persistence; Codex workers use ephemeral sessions.

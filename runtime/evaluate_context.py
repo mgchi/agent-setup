@@ -12,7 +12,7 @@ import tempfile
 from pydantic import BaseModel, ConfigDict, Field
 
 from context_store import Project, Settings, Store, atomic_text, linked_path
-from team_runtime import Provider, invoke
+from team_runtime import Provider, invoke, resolve_provider
 
 
 class Case(BaseModel):
@@ -202,7 +202,7 @@ def main() -> int:
     if not math.isfinite(args.timeout) or not 0 < args.timeout <= 600:
         parser.error("--timeout must be positive, finite, and at most 600 seconds.")
     # Intentionally read only provider definitions, never user context or project registrations.
-    providers = [Provider.model_validate(p) for p in json.loads(args.settings.read_text())["providers"]]
+    providers = [resolve_provider(Provider.model_validate(p)) for p in json.loads(args.settings.read_text())["providers"]]
     if len(providers) != 2 or {p.name for p in providers} != {"claude", "codex"}:
         parser.error("This paired pilot requires exactly one Claude and one Codex provider.")
     report: dict[str, object] = {"version": 1, "status": "in_progress", "scope": "synthetic supplied-context decision pilot", "trials": [],
