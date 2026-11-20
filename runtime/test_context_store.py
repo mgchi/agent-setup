@@ -42,14 +42,14 @@ class ContextTests(unittest.TestCase):
 
     def test_default_stands_for_the_current_adviser_model_and_effort(self) -> None:
         for name, default in ADVISER_DEFAULTS.items():
-            follows = resolve_provider(Provider(name=name, command=(name,), model="default", effort="default"))
+            follows = resolve_provider(Provider(name=name, command=(name,), model="toolkit-default", effort="toolkit-default"))
             self.assertEqual((follows.model, follows.effort), (default.model, default.effort))
-            pinned = resolve_provider(Provider(name=name, command=(name,), model="example-model", effort="default"))
+            pinned = resolve_provider(Provider(name=name, command=(name,), model="example-model", effort="toolkit-default"))
             self.assertEqual((pinned.model, pinned.effort), ("example-model", default.effort))
         saved = Settings.model_validate_json(Settings(context_root=self.root / "fresh").model_dump_json())
         self.assertEqual([(item.name, item.model, item.effort) for item in saved.providers],
-                         [(name, "default", "default") for name in ADVISER_DEFAULTS])
-        other = Provider(name="other", command=("other",), model="default", effort="max")
+                         [(name, "toolkit-default", "toolkit-default") for name in ADVISER_DEFAULTS])
+        other = Provider(name="other", command=("other",), model="toolkit-default", effort="max")
         with self.assertRaises(ValueError):
             resolve_provider(other)
         with self.assertRaises(ValueError):

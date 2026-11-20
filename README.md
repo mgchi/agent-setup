@@ -100,9 +100,10 @@ Adviser defaults are `claude-fable-5-2` and `gpt-6.2-astra` at maximum effort.
 Codex CLI 0.166.0 or newer. Both advisers can incur provider usage charges. A
 missing model or exhausted provider does not prevent the lead from finishing.
 
-A new installation follows the defaults, so updating the toolkit also moves it
-to newer ones. An installation that saved a model keeps it, and `./install`
-says when a saved model differs from the default. Choose and check models with:
+A new installation saves `toolkit-default` for each model and effort, so
+updating the toolkit also moves it to newer defaults. An installation that saved
+a model keeps it, and `./install` says when a saved model differs from the
+default. Choose and check models with:
 
 ```sh
 agent-context adviser list                           # models, effort, and client releases
@@ -112,8 +113,8 @@ agent-context adviser reset codex                    # follow the toolkit defaul
 agent-context adviser test                           # one small real call per adviser
 ```
 
-`adviser test` uses each adviser's model and effort exactly as a task would, and
-says when a client is too old for its model.
+`adviser list` flags a client that is too old for the default model. `adviser
+test` uses each adviser's model and effort exactly as a task would.
 
 Registered Git worktrees share project context. Separate projects and nested
 repositories remain isolated. Advisers are disabled for unregistered projects

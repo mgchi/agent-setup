@@ -85,18 +85,25 @@ class RuntimeTests(unittest.TestCase):
         executable.write_text(FAKE_IMPORTS + textwrap.dedent(body))
         return Provider(name=name, command=(sys.executable, str(executable)), model="chosen-model", effort="max")
 
-    def test_default_model_and_effort_reach_the_client_resolved(self) -> None:
-        fake = self.provider("codex", """
+    def test_toolkit_default_reaches_each_client_as_a_model_and_effort(self) -> None:
+        bodies = {"codex": """
             words = json.dumps({"summary": " ".join(sys.argv)})
             print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": words}}))
             print(json.dumps({"type": "turn.completed"}))
-        """)
-        result = self.call(Provider(name="codex", command=fake.command, model="default", effort="default"))
-        self.assertTrue(result.ok, result)
-        sent = json.loads(result.text)["summary"]
-        default = ADVISER_DEFAULTS["codex"]
-        self.assertIn(f"--model {default.model} ", sent)
-        self.assertIn(f'model_reasoning_effort="{default.effort}"', sent)
+        """, "claude": """
+            words = {"summary": " ".join(sys.argv) + " effort=" + os.environ["CLAUDE_CODE_EFFORT_LEVEL"]}
+            print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "structured_output": words}))
+        """}
+        for name, body in bodies.items():
+            with self.subTest(name=name):
+                fake = self.provider(name, body)
+                result = self.call(Provider(name=name, command=fake.command, model="toolkit-default", effort="toolkit-default"))
+                self.assertTrue(result.ok, result)
+                sent = json.loads(result.text)["summary"]
+                default = ADVISER_DEFAULTS[name]
+                self.assertIn(f"--model {default.model} ", sent)
+                self.assertIn(f'model_reasoning_effort="{default.effort}"' if name == "codex" else f"--effort {default.effort} ", sent)
+                self.assertNotIn("toolkit-default", sent)
 
     def call(
         self, provider: Provider, *, prompt: str = "packet", **options: float

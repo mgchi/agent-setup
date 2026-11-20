@@ -44,11 +44,12 @@ ADVISER_DEFAULTS = {
     "claude": AdviserDefault(model="claude-fable-5-2", effort="max", client="2.1.290"),
     "codex": AdviserDefault(model="gpt-6.2-astra", effort="max", client="0.166.0"),
 }
-FOLLOW_DEFAULT = "default"
+# Not "default": a client may give that word its own meaning.
+FOLLOW_DEFAULT = "toolkit-default"
 
 
 def resolve_provider(provider: Provider) -> Provider:
-    """Replace a model or effort of `default` with the toolkit's current choice."""
+    """Replace a model or effort of `toolkit-default` with the toolkit's current choice."""
     if FOLLOW_DEFAULT not in (provider.model, provider.effort):
         return provider
     default = ADVISER_DEFAULTS.get(provider.name)

@@ -129,6 +129,11 @@ class ToolPrivacyTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertEqual(guard(self.index, self.repo, name, payload), "")
 
+    def test_setup_commands_run_from_inside_the_context_root(self) -> None:
+        for command in ("agent-context project list", "agent-context adviser list", "agent-context adviser reset codex"):
+            with self.subTest(command=command):
+                self.assertEqual(guard(self.index, self.context, "Bash", {"command": command}), "")
+
     def test_private_exemption_cannot_hide_credentials_or_external_actions(self) -> None:
         result = guard(self.index, self.repo, "Write", {"file_path": str(self.private_file),
                                                        "content": "sk-" + "a" * 30})

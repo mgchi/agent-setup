@@ -6,6 +6,7 @@ import io
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -16,7 +17,7 @@ from context_store import Capture, Cooldown, LocalAdapter, Memory, Project, Sett
 from agent_context import (
     CONTINUATION, Advice, CheckpointInput, HookInput, MemoryDraft, PhaseResult,
     add_project, begin, call_provider, check_advisers, checkpoint, collect, hook, list_advisers, main, parser, read_run, release,
-    review, run_adapter, run_path, set_adviser, worker,
+    client_version, review, run_adapter, run_path, set_adviser, worker,
 )
 from disclosure import DisclosureError
 from team_runtime import ADVISER_DEFAULTS, Outcome, Provider
@@ -339,7 +340,7 @@ class AdviserTests(unittest.TestCase):
         self.addCleanup(releases.stop)
 
     def test_new_settings_follow_defaults_and_runs_record_the_models_used(self) -> None:
-        self.assertEqual(self.settings_path.read_text().count('"model": "default"'), 2)
+        self.assertEqual(self.settings_path.read_text().count('"model": "toolkit-default"'), 2)
         project = self.root / 'project'
         project.mkdir()
         store = Store(Settings(context_root=self.root / 'context', projects=[Project(slug='example', roots=[project])]))
@@ -348,6 +349,11 @@ class AdviserTests(unittest.TestCase):
         claude, codex = ADVISER_DEFAULTS['claude'], ADVISER_DEFAULTS['codex']
         self.assertEqual({item.name: (item.model, item.effort) for item in read_run(store, run_id).providers},
                          {'claude': (claude.model, claude.effort), 'codex': (codex.model, 'low')})
+        pinned = Settings(context_root=self.root / 'context', projects=[Project(slug='example', roots=[project])],
+                          providers=[Provider(name='codex', command=('codex',), model='example-model', effort='high')])
+        with patch('agent_context.spawn_worker'):
+            run_id = begin(Store(pinned), self.settings_path, project, 'Plan it.\nteam-codex-model: toolkit-default', turn='other').run_id
+        self.assertEqual([(item.model, item.effort) for item in read_run(Store(pinned), run_id).providers], [(codex.model, 'high')])
 
     def test_set_pins_one_adviser_and_reset_follows_defaults_again(self) -> None:
         pinned = {item.name: item for item in set_adviser(self.settings_path, 'codex', model='example-model', effort='high').advisers}
@@ -355,13 +361,13 @@ class AdviserTests(unittest.TestCase):
         self.assertIn('Pinned to example-model', pinned['codex'].note)
         self.assertEqual(pinned['claude'].follows_default, ['model', 'effort'])
         self.assertEqual({item.name: item.model for item in load_settings(self.settings_path).providers},
-                         {'claude': 'default', 'codex': 'example-model'})
-        partly = {item.name: item for item in set_adviser(self.settings_path, 'codex', model='default').advisers}
+                         {'claude': 'toolkit-default', 'codex': 'example-model'})
+        partly = {item.name: item for item in set_adviser(self.settings_path, 'codex', model='toolkit-default').advisers}
         self.assertEqual((partly['codex'].model, partly['codex'].effort, partly['codex'].follows_default),
                          (ADVISER_DEFAULTS['codex'].model, 'high', ['model']))
-        reset = set_adviser(self.settings_path, 'all', model='default', effort='default')
+        reset = set_adviser(self.settings_path, 'all', model='toolkit-default', effort='toolkit-default')
         self.assertEqual([item.follows_default for item in reset.advisers], [['model', 'effort']] * 2)
-        self.assertEqual({(item.model, item.effort) for item in load_settings(self.settings_path).providers}, {('default', 'default')})
+        self.assertEqual({(item.model, item.effort) for item in load_settings(self.settings_path).providers}, {('toolkit-default', 'toolkit-default')})
         with self.assertRaises(ValueError):
             set_adviser(self.settings_path, 'codex')
 
@@ -372,8 +378,21 @@ class AdviserTests(unittest.TestCase):
         self.assertEqual((advisers['codex'].client, advisers['codex'].client_needed), ('0.99.0', needed))
         self.assertIn(f'needs client {needed} or newer', advisers['codex'].note)
         with patch('agent_context.client_version', return_value=''):
-            self.assertIn('could not be run', list_advisers(load_settings(self.settings_path)).advisers[0].note)
+            self.assertIn('did not report its release', list_advisers(load_settings(self.settings_path)).advisers[0].note)
         self.assertLess(release('0.99.0'), release('0.166.0'))
+
+    def test_client_release_comes_only_from_a_successful_version_report(self) -> None:
+        def client(body: str) -> tuple[str, ...]:
+            script = self.root / f'client-{len(list(self.root.glob("client-*")))}.py'
+            script.write_text('import sys\n' + body)
+            return (sys.executable, str(script))
+
+        with patch('agent_context.client_version', client_version):
+            self.assertEqual(client_version(client('print("example-cli 1.2.3-beta (build 4.5)")')), '1.2.3')
+            self.assertEqual(client_version(client('print("ready")')), '')
+            self.assertEqual(client_version(client('print("requires system 13.4", file=sys.stderr)\nprint("1.2.3")\nsys.exit(1)')), '')
+            self.assertEqual(client_version(client('print("warning 9.9.9", file=sys.stderr)\nprint("example-cli 0.4.0")')), '0.4.0')
+            self.assertEqual(client_version((str(self.root / 'missing-client'),)), '')
 
     def test_check_calls_each_adviser_once_and_clears_a_stale_cooldown(self) -> None:
         store = Store(load_settings(self.settings_path))
@@ -383,6 +402,7 @@ class AdviserTests(unittest.TestCase):
 
         def answer(provider: Provider, prompt: str, directory: Path, **options: object) -> Outcome:
             calls.append((provider.name, provider.model, provider.effort))
+            self.assertFalse(directory.resolve().is_relative_to(store.root))
             works = provider.name == 'claude'
             return Outcome(ok=works, kind='success' if works else 'unavailable', elapsed=1.26)
 
@@ -395,7 +415,19 @@ class AdviserTests(unittest.TestCase):
         self.assertIn('upgrade the client', checks['codex'].note)
         self.assertIsNone(store.cooldown('claude:earlier-model:max'))
         self.assertIsNotNone(store.cooldown('codex:earlier-model:max'))
-        self.assertEqual(list(store.local.glob('adviser-check-*')), [])
+        self.assertEqual([item.name for item in store.local.iterdir() if item.is_dir()], [])
+
+    def test_failed_check_names_its_own_cause(self) -> None:
+        set_adviser(self.settings_path, 'codex', model='example-model')
+        store = Store(load_settings(self.settings_path))
+        for kind, expected in (('auth', 'Sign in'), ('quota', 'usage limit'), ('unavailable', 'may lack access'), ('timeout', '')):
+            with self.subTest(kind=kind), patch('agent_context.invoke', return_value=Outcome(ok=False, kind=kind)):
+                note = check_advisers(store, 'codex').checks[0].note
+                self.assertIn(expected, note)
+                self.assertNotIn('Pinned', note)
+        providers = [item for item in store.settings.providers if item.name == 'claude']
+        with patch('agent_context.invoke', return_value=Outcome(ok=True, kind='success')), self.assertRaises(ValueError):
+            check_advisers(Store(store.settings.model_copy(update={'providers': providers})), 'codex')
 
     def test_command_line_changes_and_lists_advisers(self) -> None:
         def run(*arguments: str) -> tuple[int, dict[str, object]]:

@@ -52,9 +52,15 @@ For an installation you want to inspect afterward:
 ## Changing an adviser default
 
 Edit `ADVISER_DEFAULTS` in `runtime/team_runtime.py`: the model, its effort, and
-the oldest client release that accepts it. Update the sentence in `README.md`
-that names the defaults; a test fails while the two disagree. Confirm the model
-and the client release with `agent-context adviser test` before proposing them.
+the oldest client release that accepts it. Update the two sentences in
+`README.md` that name the defaults and their client releases; a test fails while
+they disagree with the table. Then check the new default with one small real
+call from an isolated installation of your change:
+
+```sh
+./install --home /absolute/path/to/test-home
+/absolute/path/to/test-home/.local/bin/agent-context adviser test
+```
 
 ## Changes we can review
 

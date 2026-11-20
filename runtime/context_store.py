@@ -143,7 +143,7 @@ class LocalAdapter(BaseModel):
 
 
 def default_providers() -> list[Provider]:
-    # Saved as `default`, so an installation that never chose a model follows later defaults.
+    # Saved as `toolkit-default`, so an installation that never chose a model follows later defaults.
     return [Provider(name=name, command=(name,), model=FOLLOW_DEFAULT, effort=FOLLOW_DEFAULT)
             for name in ADVISER_DEFAULTS]
 
@@ -174,7 +174,7 @@ class Settings(BaseModel):
     @classmethod
     def known_defaults(cls, values: list[Provider]) -> list[Provider]:
         for provider in values:
-            resolve_provider(provider)  # Only a known adviser may be saved as `default`.
+            resolve_provider(provider)  # Only a known adviser may follow the toolkit.
         return values
 
     @field_validator("context_root")

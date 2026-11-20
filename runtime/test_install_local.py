@@ -93,7 +93,7 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(install(self.home).notes, [])
         settings = json.loads(saved.read_text())
         self.assertEqual([(item['name'], item['model'], item['effort']) for item in settings['providers']],
-                         [(name, 'default', 'default') for name in ADVISER_DEFAULTS])
+                         [(name, 'toolkit-default', 'toolkit-default') for name in ADVISER_DEFAULTS])
         settings['providers'][1]['model'] = 'earlier-model'
         atomic_text(saved, json.dumps(settings))
         notes = install(self.home).notes
@@ -110,9 +110,10 @@ class InstallTests(unittest.TestCase):
         if not readme.exists():
             self.skipTest('An installed copy has no README.')
         text = ' '.join(readme.read_text().split())
-        for default in ADVISER_DEFAULTS.values():
-            self.assertIn(f'`{default.model}` needs', text)
-            self.assertIn(f'{default.client} or newer', text)
+        claude, codex = ADVISER_DEFAULTS['claude'], ADVISER_DEFAULTS['codex']
+        self.assertIn(f'Adviser defaults are `{claude.model}` and `{codex.model}` at', text)
+        self.assertIn(f'`{claude.model}` needs Claude Code {claude.client} or newer', text)
+        self.assertIn(f'`{codex.model}` needs Codex CLI {codex.client} or newer', text)
 
     def test_reinstall_is_idempotent_and_preserves_kernels(self) -> None:
         install(self.home, seed_path=self.seed_path)
