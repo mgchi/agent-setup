@@ -13,6 +13,7 @@ import tomlkit
 import install_local
 from context_store import Capture, Cooldown, Memory, Settings, Store, atomic_text, digest
 from install_local import PreferenceSeed, build_plan, import_preferences, install, load_seed, managed_section
+from team_runtime import ADVISER_DEFAULTS
 
 
 class InstallTests(unittest.TestCase):
@@ -85,6 +86,33 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(os.readlink(self.home / '.agents/skills/context-workflow'), '../../.claude/skills/context-workflow')
         self.assertEqual(self.claude.stat().st_mode & 0o777, 0o600)
         self.assertEqual((self.home / '.context-refresh/refresh.sh').stat().st_mode & 0o777, 0o700)
+
+    def test_first_installation_follows_adviser_defaults_and_saved_models_are_kept(self) -> None:
+        saved = self.home / '.config/agent-context/settings.json'
+        saved.unlink()
+        self.assertEqual(install(self.home).notes, [])
+        settings = json.loads(saved.read_text())
+        self.assertEqual([(item['name'], item['model'], item['effort']) for item in settings['providers']],
+                         [(name, 'default', 'default') for name in ADVISER_DEFAULTS])
+        settings['providers'][1]['model'] = 'earlier-model'
+        atomic_text(saved, json.dumps(settings))
+        notes = install(self.home).notes
+        self.assertEqual(json.loads(saved.read_text())['providers'][1]['model'], 'earlier-model')
+        self.assertEqual(len(notes), 1)
+        self.assertIn('pinned to earlier-model', notes[0])
+        self.assertIn('agent-context adviser reset codex', notes[0])
+        settings['providers'][1]['model'] = ADVISER_DEFAULTS['codex'].model
+        atomic_text(saved, json.dumps(settings))
+        self.assertEqual(install(self.home).notes, [])
+
+    def test_readme_names_the_adviser_defaults(self) -> None:
+        readme = Path(install_local.__file__).parent.parent / 'README.md'
+        if not readme.exists():
+            self.skipTest('An installed copy has no README.')
+        text = ' '.join(readme.read_text().split())
+        for default in ADVISER_DEFAULTS.values():
+            self.assertIn(f'`{default.model}` needs', text)
+            self.assertIn(f'{default.client} or newer', text)
 
     def test_reinstall_is_idempotent_and_preserves_kernels(self) -> None:
         install(self.home, seed_path=self.seed_path)

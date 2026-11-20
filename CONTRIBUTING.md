@@ -49,6 +49,13 @@ For an installation you want to inspect afterward:
 | `runtime/templates/` | Generic installed instructions and skills |
 | `runtime/test_*.py` | Unit and regression coverage |
 
+## Changing an adviser default
+
+Edit `ADVISER_DEFAULTS` in `runtime/team_runtime.py`: the model, its effort, and
+the oldest client release that accepts it. Update the sentence in `README.md`
+that names the defaults; a test fails while the two disagree. Confirm the model
+and the client release with `agent-context adviser test` before proposing them.
+
 ## Changes we can review
 
 - Reuse existing helpers and preserve current callers and settings.

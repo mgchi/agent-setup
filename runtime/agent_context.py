@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
@@ -24,7 +25,7 @@ from context_store import (
     read_text, read_packet_source, save_model, sensitive_path,
 )
 from refresh_context import prune_logs
-from team_runtime import Outcome, Provider, invoke
+from team_runtime import ADVISER_DEFAULTS, FOLLOW_DEFAULT, Outcome, Provider, invoke, resolve_provider
 from disclosure import DisclosureError, DisclosureIndex, RawScanner, build_index, regular
 from tool_privacy import denial, guard, staged
 from instruction_copies import export_instruction_bundle
@@ -144,6 +145,116 @@ def add_project(settings_path: Path, slug: str, path: Path, *, advisers: bool | 
         return registration
 
 
+class Adviser(BaseModel):
+    name: str
+    model: str
+    effort: str
+    follows_default: list[str]
+    default_model: str
+    default_effort: str
+    client: str
+    client_needed: str
+    note: str = ""
+
+
+class AdviserList(BaseModel):
+    advisers: list[Adviser]
+
+
+class AdviserCheck(BaseModel):
+    name: str
+    model: str
+    effort: str
+    ok: bool
+    kind: str
+    seconds: float
+    note: str = ""
+
+
+class AdviserChecks(BaseModel):
+    checks: list[AdviserCheck]
+
+
+def client_version(command: tuple[str, ...]) -> str:
+    """Report an adviser client's release, or nothing when it cannot be run."""
+    try:
+        result = subprocess.run([*command, "--version"], capture_output=True, text=True,
+                                stdin=subprocess.DEVNULL, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    found = re.search(r"\d+(?:\.\d+)+", result.stdout + result.stderr)
+    return found.group(0) if found else ""
+
+
+def release(version: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in version.split("."))
+
+
+def describe_adviser(provider: Provider) -> Adviser:
+    default = ADVISER_DEFAULTS[provider.name]
+    active = resolve_provider(provider)
+    client = client_version(provider.command)
+    note = ""
+    if active.model != default.model:
+        note = f"Pinned to {active.model}; the toolkit default is {default.model}."
+    elif not client:
+        note = "The client could not be run, so its release is unknown."
+    elif release(client) < release(default.client):
+        note = f"{default.model} needs client {default.client} or newer; upgrade the client."
+    return Adviser(name=provider.name, model=active.model, effort=active.effort,
+                   follows_default=[field for field in ("model", "effort") if getattr(provider, field) == FOLLOW_DEFAULT],
+                   default_model=default.model, default_effort=default.effort,
+                   client=client, client_needed=default.client, note=note)
+
+
+def list_advisers(settings: Settings) -> AdviserList:
+    return AdviserList(advisers=[describe_adviser(provider) for provider in settings.providers
+                                 if provider.name in ADVISER_DEFAULTS])
+
+
+def set_adviser(settings_path: Path, name: str, *, model: str | None = None, effort: str | None = None) -> AdviserList:
+    """Save a model or effort for one adviser or `all`; `default` follows the toolkit."""
+    changes = {field: value for field, value in (("model", model), ("effort", effort)) if value is not None}
+    if not changes:
+        raise ValueError("Give a model, an effort, or both.")
+    with lock(settings_path.parent / 'install.lock'):
+        settings = load_settings(settings_path)
+        chosen = [provider for provider in settings.providers if name in ("all", provider.name)]
+        if not chosen:
+            raise ValueError("That adviser is not configured.")
+        providers = [provider.model_copy(update=changes) if provider in chosen else provider
+                     for provider in settings.providers]
+        updated = Settings.model_validate({**settings.model_dump(), 'providers': [item.model_dump() for item in providers]})
+        if updated != settings:
+            save_model(settings_path, updated)
+    return list_advisers(updated)
+
+
+def check_advisers(store: Store, name: str) -> AdviserChecks:
+    """Make one small real call per adviser, the way a run would, and say what failed."""
+    hints = {"unavailable": "The client did not accept this model or effort for this account.",
+             "auth": "Sign in to the client again.", "quota": "The account has reached a usage limit.",
+             "account-policy": "The account's policy does not allow this call."}
+    schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"], "additionalProperties": False}
+    checks: list[AdviserCheck] = []
+    for configured in store.settings.providers:
+        if configured.name not in ADVISER_DEFAULTS or name not in ("all", configured.name):
+            continue
+        provider = resolve_provider(configured)
+        with tempfile.TemporaryDirectory(dir=store.local, prefix="adviser-check-") as directory:
+            outcome = invoke(provider, 'This is a connection check. Reply with {"ok": true}.', Path(directory) / "attempt",
+                             schema=schema, timeout=180, idle_timeout=120)
+        note = ""
+        if outcome.ok:
+            # A model that now works should not wait out a cooldown from an earlier failure.
+            store.reset_cooldown(provider.name)
+        else:
+            note = describe_adviser(configured).note or hints.get(outcome.kind, "")
+        checks.append(AdviserCheck(name=provider.name, model=provider.model, effort=provider.effort, ok=outcome.ok,
+                                   kind=outcome.kind, seconds=round(outcome.elapsed, 1), note=note))
+    return AdviserChecks(checks=checks)
+
+
 class CheckpointResult(BaseModel):
     run_id: str
     memory_keys: list[str]
@@ -209,7 +320,7 @@ def select_providers(settings: Settings, scope: str, prompt: str) -> list[Provid
     selected: list[Provider] = []
     if choice == "off":
         return selected
-    for provider in settings.providers:
+    for provider in map(resolve_provider, settings.providers):
         if choice in {"claude", "codex"} and provider.name != choice:
             continue
         models = re.findall(rf"(?im)^team-{provider.name}-model:\s*([\w./:-]+)\s*$", directive)
@@ -796,6 +907,14 @@ def run_adapter(store: Store, name: str, arguments: list[str], cwd: Path) -> int
                           cwd=cwd, check=False, timeout=120).returncode
 
 
+def setting(pattern: str) -> Callable[[str], str]:
+    def parse(value: str) -> str:
+        if not re.fullmatch(pattern, value):
+            raise argparse.ArgumentTypeError(f"expected text matching {pattern}")
+        return value
+    return parse
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     root.add_argument("--settings", type=Path, default=SETTINGS_PATH)
@@ -807,6 +926,15 @@ def parser() -> argparse.ArgumentParser:
     add.add_argument('path', type=Path)
     add.add_argument('--advisers', choices=['on', 'off'], help='Set automatic advice for this project; omission preserves the existing choice.')
     project_commands.add_parser('list')
+    adviser = commands.add_parser('adviser')
+    adviser_commands = adviser.add_subparsers(dest='adviser_command', required=True)
+    adviser_commands.add_parser('list')
+    change = adviser_commands.add_parser('set')
+    change.add_argument('name', choices=[*ADVISER_DEFAULTS])
+    change.add_argument('--model', type=setting(r"[\w./:-]+"), help='A model ID, or "default" to follow the toolkit.')
+    change.add_argument('--effort', type=setting(r"[a-z]+"), help='An effort level, or "default" to follow the toolkit.')
+    for name in ('reset', 'test'):
+        adviser_commands.add_parser(name).add_argument('name', choices=[*ADVISER_DEFAULTS, 'all'], nargs='?', default='all')
     migration = commands.add_parser('migrate')
     migration.add_argument('manifest', type=Path, nargs='?')
     migration.add_argument('--apply', action='store_true')
@@ -856,6 +984,8 @@ def parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     options = parser().parse_args()
+    if options.command == 'adviser' and options.adviser_command == 'set' and options.model is None and options.effort is None:
+        parser().error('adviser set needs --model, --effort, or both')
     try:
         if options.command == 'migrate':
             if options.restore:
@@ -878,6 +1008,19 @@ def main() -> int:
                       if options.project_command == 'add'
                       else ProjectList(projects=load_settings(options.settings).projects))
             print(result.model_dump_json(indent=2))
+            return 0
+        if options.command == 'adviser':
+            if options.adviser_command == 'test':
+                checks = check_advisers(Store(load_settings(options.settings)), options.name)
+                print(checks.model_dump_json(indent=2))
+                return 0 if all(check.ok for check in checks.checks) else 1
+            if options.adviser_command == 'list':
+                advisers = list_advisers(load_settings(options.settings))
+            elif options.adviser_command == 'reset':
+                advisers = set_adviser(options.settings, options.name, model=FOLLOW_DEFAULT, effort=FOLLOW_DEFAULT)
+            else:
+                advisers = set_adviser(options.settings, options.name, model=options.model, effort=options.effort)
+            print(advisers.model_dump_json(indent=2))
             return 0
         store = Store(load_settings(options.settings))
         if options.command == 'adapter':

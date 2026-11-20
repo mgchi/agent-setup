@@ -15,7 +15,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from disclosure import DisclosureIndex, build_index
-from team_runtime import Outcome, Provider, invoke, redacted_tail
+from team_runtime import ADVISER_DEFAULTS, Outcome, Provider, invoke, redacted_tail
 
 SCHEMA = {
     "type": "object",
@@ -84,6 +84,19 @@ class RuntimeTests(unittest.TestCase):
         executable = self.root / f"fake-{self.sequence}.py"
         executable.write_text(FAKE_IMPORTS + textwrap.dedent(body))
         return Provider(name=name, command=(sys.executable, str(executable)), model="chosen-model", effort="max")
+
+    def test_default_model_and_effort_reach_the_client_resolved(self) -> None:
+        fake = self.provider("codex", """
+            words = json.dumps({"summary": " ".join(sys.argv)})
+            print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": words}}))
+            print(json.dumps({"type": "turn.completed"}))
+        """)
+        result = self.call(Provider(name="codex", command=fake.command, model="default", effort="default"))
+        self.assertTrue(result.ok, result)
+        sent = json.loads(result.text)["summary"]
+        default = ADVISER_DEFAULTS["codex"]
+        self.assertIn(f"--model {default.model} ", sent)
+        self.assertIn(f'model_reasoning_effort="{default.effort}"', sent)
 
     def call(
         self, provider: Provider, *, prompt: str = "packet", **options: float

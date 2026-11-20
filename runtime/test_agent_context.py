@@ -1,6 +1,8 @@
 """Behavioral checks for lead continuity and bounded automatic work."""
 
 import concurrent.futures
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -10,13 +12,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from context_store import Capture, LocalAdapter, Memory, Project, Settings, Store, atomic_text, digest, load_settings, lock, save_model
+from context_store import Capture, Cooldown, LocalAdapter, Memory, Project, Settings, Store, atomic_text, digest, load_settings, lock, save_model
 from agent_context import (
     CONTINUATION, Advice, CheckpointInput, HookInput, MemoryDraft, PhaseResult,
-    add_project, begin, call_provider, checkpoint, collect, hook, parser, read_run, review, run_adapter, run_path, worker,
+    add_project, begin, call_provider, check_advisers, checkpoint, collect, hook, list_advisers, main, parser, read_run, release,
+    review, run_adapter, run_path, set_adviser, worker,
 )
 from disclosure import DisclosureError
-from team_runtime import Outcome, Provider
+from team_runtime import ADVISER_DEFAULTS, Outcome, Provider
 
 
 class WorkflowTests(unittest.TestCase):
@@ -322,6 +325,98 @@ class AdapterTests(unittest.TestCase):
     def test_registration_requires_a_known_project(self) -> None:
         with self.assertRaisesRegex(ValueError, 'registered project'):
             Settings(context_root=self.root / 'context', local_adapters={'canonical': self.adapter})
+
+
+class AdviserTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+        self.settings_path = self.root / 'settings.json'
+        save_model(self.settings_path, Settings(context_root=self.root / 'context'))
+        releases = patch('agent_context.client_version', side_effect=lambda command: {'claude': '9.0.0', 'codex': '0.99.0'}[command[0]])
+        releases.start()
+        self.addCleanup(releases.stop)
+
+    def test_new_settings_follow_defaults_and_runs_record_the_models_used(self) -> None:
+        self.assertEqual(self.settings_path.read_text().count('"model": "default"'), 2)
+        project = self.root / 'project'
+        project.mkdir()
+        store = Store(Settings(context_root=self.root / 'context', projects=[Project(slug='example', roots=[project])]))
+        with patch('agent_context.spawn_worker'):
+            run_id = begin(store, self.settings_path, project, 'Plan the migration.\nteam-codex-effort: low').run_id
+        claude, codex = ADVISER_DEFAULTS['claude'], ADVISER_DEFAULTS['codex']
+        self.assertEqual({item.name: (item.model, item.effort) for item in read_run(store, run_id).providers},
+                         {'claude': (claude.model, claude.effort), 'codex': (codex.model, 'low')})
+
+    def test_set_pins_one_adviser_and_reset_follows_defaults_again(self) -> None:
+        pinned = {item.name: item for item in set_adviser(self.settings_path, 'codex', model='example-model', effort='high').advisers}
+        self.assertEqual((pinned['codex'].model, pinned['codex'].effort, pinned['codex'].follows_default), ('example-model', 'high', []))
+        self.assertIn('Pinned to example-model', pinned['codex'].note)
+        self.assertEqual(pinned['claude'].follows_default, ['model', 'effort'])
+        self.assertEqual({item.name: item.model for item in load_settings(self.settings_path).providers},
+                         {'claude': 'default', 'codex': 'example-model'})
+        partly = {item.name: item for item in set_adviser(self.settings_path, 'codex', model='default').advisers}
+        self.assertEqual((partly['codex'].model, partly['codex'].effort, partly['codex'].follows_default),
+                         (ADVISER_DEFAULTS['codex'].model, 'high', ['model']))
+        reset = set_adviser(self.settings_path, 'all', model='default', effort='default')
+        self.assertEqual([item.follows_default for item in reset.advisers], [['model', 'effort']] * 2)
+        self.assertEqual({(item.model, item.effort) for item in load_settings(self.settings_path).providers}, {('default', 'default')})
+        with self.assertRaises(ValueError):
+            set_adviser(self.settings_path, 'codex')
+
+    def test_list_says_when_a_client_is_too_old_for_the_default(self) -> None:
+        advisers = {item.name: item for item in list_advisers(load_settings(self.settings_path)).advisers}
+        self.assertEqual((advisers['claude'].client, advisers['claude'].note), ('9.0.0', ''))
+        needed = ADVISER_DEFAULTS['codex'].client
+        self.assertEqual((advisers['codex'].client, advisers['codex'].client_needed), ('0.99.0', needed))
+        self.assertIn(f'needs client {needed} or newer', advisers['codex'].note)
+        with patch('agent_context.client_version', return_value=''):
+            self.assertIn('could not be run', list_advisers(load_settings(self.settings_path)).advisers[0].note)
+        self.assertLess(release('0.99.0'), release('0.166.0'))
+
+    def test_check_calls_each_adviser_once_and_clears_a_stale_cooldown(self) -> None:
+        store = Store(load_settings(self.settings_path))
+        store.set_cooldown(Cooldown(identity='claude:earlier-model:max', kind='unavailable', detail='Earlier failure', until=time.time() + 1000))
+        store.set_cooldown(Cooldown(identity='codex:earlier-model:max', kind='unavailable', detail='Earlier failure', until=time.time() + 1000))
+        calls: list[tuple[str, str, str]] = []
+
+        def answer(provider: Provider, prompt: str, directory: Path, **options: object) -> Outcome:
+            calls.append((provider.name, provider.model, provider.effort))
+            works = provider.name == 'claude'
+            return Outcome(ok=works, kind='success' if works else 'unavailable', elapsed=1.26)
+
+        with patch('agent_context.invoke', side_effect=answer):
+            checks = {item.name: item for item in check_advisers(store, 'all').checks}
+            self.assertEqual([item.name for item in check_advisers(store, 'codex').checks], ['codex'])
+        self.assertEqual(calls[:2], [(name, default.model, default.effort) for name, default in ADVISER_DEFAULTS.items()])
+        self.assertEqual((checks['claude'].ok, checks['claude'].note, checks['claude'].seconds), (True, '', 1.3))
+        self.assertFalse(checks['codex'].ok)
+        self.assertIn('upgrade the client', checks['codex'].note)
+        self.assertIsNone(store.cooldown('claude:earlier-model:max'))
+        self.assertIsNotNone(store.cooldown('codex:earlier-model:max'))
+        self.assertEqual(list(store.local.glob('adviser-check-*')), [])
+
+    def test_command_line_changes_and_lists_advisers(self) -> None:
+        def run(*arguments: str) -> tuple[int, dict[str, object]]:
+            output = io.StringIO()
+            with patch('sys.argv', ['agent-context', '--settings', str(self.settings_path), 'adviser', *arguments]), \
+                    contextlib.redirect_stdout(output):
+                status = main()
+            return status, json.loads(output.getvalue())
+
+        status, changed = run('set', 'codex', '--model', 'example-model', '--effort', 'high')
+        self.assertEqual((status, changed['advisers'][1]['model'], changed['advisers'][1]['effort']), (0, 'example-model', 'high'))
+        self.assertEqual(run('list')[1], changed)
+        self.assertEqual(run('reset')[1]['advisers'][1]['follows_default'], ['model', 'effort'])
+        with patch('agent_context.invoke', return_value=Outcome(ok=False, kind='auth')):
+            status, checked = run('test', 'claude')
+        self.assertEqual((status, checked['checks'][0]['note']), (1, 'Sign in to the client again.'))
+        for arguments in (['set', 'codex', '--model', 'not a model'], ['set', 'codex', '--effort', 'High'],
+                          ['set', 'other', '--model', 'x'], ['set', 'all', '--model', 'x'], ['set', 'codex']):
+            with self.subTest(arguments=arguments), self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()), \
+                    patch('sys.argv', ['agent-context', '--settings', str(self.settings_path), 'adviser', *arguments]):
+                main()
 
 
 class ProjectTests(unittest.TestCase):

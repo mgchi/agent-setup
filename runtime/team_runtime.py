@@ -31,6 +31,35 @@ class Provider(BaseModel):
     effort: str
 
 
+class AdviserDefault(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    model: str
+    effort: str
+    client: str  # The oldest client release that accepts the model.
+
+
+# Change an adviser default here, and nowhere else in the runtime.
+ADVISER_DEFAULTS = {
+    "claude": AdviserDefault(model="claude-fable-5-2", effort="max", client="2.1.290"),
+    "codex": AdviserDefault(model="gpt-6.2-astra", effort="max", client="0.166.0"),
+}
+FOLLOW_DEFAULT = "default"
+
+
+def resolve_provider(provider: Provider) -> Provider:
+    """Replace a model or effort of `default` with the toolkit's current choice."""
+    if FOLLOW_DEFAULT not in (provider.model, provider.effort):
+        return provider
+    default = ADVISER_DEFAULTS.get(provider.name)
+    if default is None:
+        raise ValueError("Only the Claude and Codex advisers have defaults.")
+    return provider.model_copy(update={
+        "model": default.model if provider.model == FOLLOW_DEFAULT else provider.model,
+        "effort": default.effort if provider.effort == FOLLOW_DEFAULT else provider.effort,
+    })
+
+
 class Outcome(BaseModel):
     ok: bool
     text: str = ""
@@ -632,6 +661,7 @@ def invoke(
             for argument in provider.command
         ):
             raise ValueError("Provider commands must not bypass permissions.")
+        provider = resolve_provider(provider)
         if not provider.model or not provider.effort:
             raise ValueError("An explicit model and effort are required.")
         if not all(
