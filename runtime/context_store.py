@@ -324,8 +324,22 @@ _STOP_WORDS = set("the and that this with from what when where which have want n
 _RUN_NAME = re.compile(r"^(?:run-[a-f0-9]{24}|smoke-[0-9]+)$")
 _MEMORY_LINE = re.compile(r"^.*<!-- agent-memory:[a-f0-9]{64} -->\s*$", re.MULTILINE)
 CAPTURE_CHARS = 24000
-_TAG_START = re.compile(r"<(\/?)([A-Za-z][\w-]*)\b")
-_CLOSING_TAG = re.compile(r"<[\s\\]*/\s*([A-Za-z][\w-]*)\b")
+_TAG_START = re.compile(r"<(\/?)([^\W\d][\w-]*)\b")
+_CLOSING_TAG = re.compile(r"<[\s\\]*/\s*([^\W\d][\w-]*)\b")
+# What follows the name of a well-formed opening tag: the rest of a dotted name, attributes,
+# then `>` or `/>`, over one line or several. A slash that ends a bare value, as in
+# `<x path=/usr/>`, belongs to the value, so only a slash captured here makes the element empty.
+_CLEAN_TAG = re.compile(r"""
+    [^\s"'<>=/{}]*
+    (?: \s+ (?: \{ [^{}<>]* \}
+              | [^\s"'<>=/{}]+
+                (?: = (?: "[^"<>]*" | '[^'<>]*'
+                        | \{ (?: [^{}<>] | \{ [^{}<>]* \} )* \}
+                        | [^\s"'<>={}]+ ) )?
+            ) )*
+    \s* (/?) >""", re.VERBOSE)
+_CLEAN_END = re.compile(r"\s*>")  # What follows the name of a well-formed closing tag.
+_OPEN_QUOTE = re.compile(r"=\s*'[^']*\Z")
 
 
 def clean(text: str, limit: int = 32000) -> str:
@@ -466,6 +480,29 @@ def terms(query: str) -> set[str]:
     return {word for word in re.findall(r"[a-z0-9][a-z0-9_-]{2,}", query.lower()) if word not in _STOP_WORDS}
 
 
+def _well_formed(prompt: str, raw: str, start: int, tag: re.Match[str]) -> re.Match[str] | None:
+    """Match the rest of a well-formed tag after its name. `raw` is its line, at `start`."""
+    closes, name = tag.group(1), tag.group(2)
+    if not (name[0].isalpha() or name[0] == "_"):
+        return None
+    rest = (_CLEAN_END if closes else _CLEAN_TAG).match(prompt, start + tag.end())
+    if not rest or rest.end() <= start + len(raw):
+        return rest
+    # A tag that runs past its line is left as text where it is more likely prose, a quoted
+    # string or code: it follows an unclosed `<name` on its line, starts inside an open quote,
+    # crosses a code fence, or ends in a `>` that stands apart from a bare word.
+    before = raw[:tag.start()]
+    if _TAG_START.search(before, before.rfind(">") + 1) or before.count('"') % 2 or _OPEN_QUOTE.search(before):
+        return None
+    if "```" in rest.group() or "~~~" in rest.group():
+        return None
+    words = rest.group()[:-1].rstrip()
+    gap = rest.group()[len(words):-1]
+    if not closes and not rest[1] and gap.splitlines() == [gap] and words[-1:] not in ('"', "'", "}"):
+        return None
+    return rest
+
+
 def direct_user_text(prompt: str, *, complete: bool = False) -> str:
     """Keep unquoted top-level prose for literal evidence checks.
 
@@ -473,6 +510,10 @@ def direct_user_text(prompt: str, *, complete: bool = False) -> str:
     no later closing tag names is ordinary text instead, so `Vec<String>`, a
     placeholder, or a bare `<br>` quotes nothing. Leave it off for text that storage
     may have cut or redacted, because the closing tag can be what was lost.
+
+    A tag normally has to fit on its line and start its name with an ASCII letter. A
+    well-formed tag may also run over several lines, or start its name with any letter
+    or an underscore.
     """
     # Closing tags are found in the raw text and in loose spellings, so a fence, an escaped
     # slash, a case change, or broken markup cannot hide one. Each name keeps its last position.
@@ -481,6 +522,7 @@ def direct_user_text(prompt: str, *, complete: bool = False) -> str:
     fence = ""
     tags: list[str] = []
     malformed = False
+    inside = 0  # Where the latest tag that ran past its line ends.
     offset = 0
     for raw in prompt.splitlines(keepends=True):
         start, offset = offset, offset + len(raw)
@@ -496,27 +538,32 @@ def direct_user_text(prompt: str, *, complete: bool = False) -> str:
             continue
         if fence:
             continue
-        quoted = False
+        quoted = start < inside
         position = end = 0
         while match := _TAG_START.search(raw, position):
-            if end < match.end():
-                end = raw.find(">", match.end())
-            if end < 0:
-                break
+            position = match.end()
+            if 0 <= end < position:
+                end = raw.find(">", position)
             closes, name = match.group(1), match.group(2)
-            opens = not closes and raw[end - 1] != "/"
-            if opens and complete and closing.get(name.casefold(), -1) < start + match.start():
-                position = match.start() + 1  # Ordinary text: a real tag may still begin inside it.
+            clean = _well_formed(prompt, raw, start, match)
+            if clean:
+                finish = clean.end() - start
+            elif end >= 0 and name[0].isascii() and name[0].isalpha():
+                finish = end + 1  # Loose markup runs to the first `>` on its line.
+            else:
                 continue
-            position = end + 1
-            quoted = True
             if closes:
                 if tags and tags[-1] == name:
                     tags.pop()
                 else:
                     malformed = True
-            elif opens:
+            elif not (clean[1] if clean else raw[end - 1] == "/"):
+                if complete and closing.get(name.casefold(), -1) < start + match.start():
+                    continue
                 tags.append(name)
+            quoted = True
+            position = finish
+            inside = max(inside, start + finish)
         if quoted or tags or malformed or raw.startswith(("    ", "\t")) or line.startswith((">", '"', "'")):
             result.append("")
             continue
