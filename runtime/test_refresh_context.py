@@ -346,6 +346,8 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual(result.servers, {"notion": "notes"})
         self.assertEqual(result.mcp.mcpServers, {"notes": {}})
         self.assertEqual(result.permissions.permissions.allow, ["mcp__notes__get"])
+        config.permissions = Permissions(allow=["mcp__notes__list"], deny=["Bash"])
+        self.assertEqual(connections(self.tools, config).permissions.permissions.allow, ["mcp__notes__list"])
 
     def test_committed_receipt_finishes_crash_recovery_without_rolling_back_notes(self) -> None:
         transaction = self.journal()

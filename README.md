@@ -193,6 +193,51 @@ Defaults cap an entry packet at 16,000 characters, retain captures for 7 days an
 runs for 14 days, and limit local storage to 256 MiB. The memory database has an
 8 MiB limit. Limits and retention are configurable.
 
+### Operating settings
+
+Inspect effective values, defaults, stored overrides, and accepted bounds:
+
+```sh
+agent-context config show --project my-project
+agent-context config show refresh.max_window_days
+agent-context config set refresh.sources.slack.enabled false
+agent-context config set refresh.incremental_budget_usd 5.50
+agent-context config reset refresh.sources.slack.enabled
+```
+
+Changes use the install lock, validate the machine settings, and replace the
+file atomically. A stored value equal to the default shows `overridden: false`.
+Project adviser settings are changed with `adviser set` and `adviser reset`.
+
+| Operating keys | Purpose and defaults |
+| --- | --- |
+| `packet_chars` | Entry packet size, 16,000 characters |
+| `capture_days`, `run_days` | Retention, 7 and 14 days |
+| `max_runs`, `max_memory`, `max_capture` | Retained counts, 32, 48, and 80 |
+| `max_local_bytes`, `max_database_bytes` | Storage budgets, 256 MiB and 8 MiB |
+| `call_timeout`, `idle_timeout`, `provider_wait` | Overall call, output idle, and slot waits, 480, 180, and 20 seconds |
+| `adviser_wait` | Lead wait budget, 50 seconds |
+| `adviser_concurrency.<provider>` | Simultaneous calls, 1 per provider |
+| `adviser_test_timeout`, `adviser_test_idle_timeout` | Probe deadlines, 180 and 120 seconds |
+| `adviser_cooldowns.<kind>` | Seconds after failure. Account-policy and auth 86400, quota 3600, unavailable 21600, transient, timeout, and default 300 |
+| `refresh.enabled`, `refresh.project` | External refresh defaults off. Choose a registered project |
+| `refresh.sources.<name>.enabled`, `refresh.sources.<name>.mcp_server` | All five sources selected when refresh is enabled. GitHub uses the CLI. The MCP names default to slack, linear-server, notion, and granola |
+| `refresh.github_repo`, `refresh.github_user`, `refresh.github_inventory_limit` | Repository and user for GitHub, initially empty. Open PR inventory limit 2000 |
+| `refresh.model`, `refresh.stale_after_hours` | Refresh and gatherer model, sonnet. Warn after 26 hours |
+| `refresh.bootstrap_days`, `refresh.max_window_days` | Initial lookback and maximum interval per pass, 14 and 7 days |
+| `refresh.bootstrap_budget_usd`, `refresh.incremental_budget_usd` | Maximum agent spend per run, 40 and 10 USD |
+| `refresh.bootstrap_timeout`, `refresh.incremental_timeout` | Agent timeout per run, 5400 and 2400 seconds |
+| `refresh.meeting_days`, `refresh.meeting_count` | Keep recent meeting notes for 90 days, up to 160. Referenced notes take priority |
+
+The same private settings file holds paths, registrations, provider commands,
+adapter pins, and refresh permissions. Use the existing project and adviser
+commands or edit those structures deliberately. Set `refresh.permissions`
+to an object containing the reviewed `allow` and `deny` lists to keep refresh
+policy here too. With this field absent, the existing refresh resource
+directory's permission file supplies the lists. Connector authentication and
+MCP registrations stay in the connected client. The operating settings display
+omits credentials, command lines, permission rules, and private path lists.
+
 ### Existing context and completion checks
 
 A registered project can select existing canonical files without moving them.
@@ -345,7 +390,7 @@ settings disables Slack and selects a different Notion server name:
 ```
 
 Use each selected MCP server's existing client registration and grant its
-intended read tools in the refresh resource directory's permission file.
+intended read tools in `refresh.permissions` or the existing resource permission file.
 GitHub uses the authenticated `gh` CLI. Configure `refresh.github_repo` and
 `refresh.github_user` when GitHub is enabled. Disabled sources require no
 credentials. A missing connector or allowance is reported as unavailable.
