@@ -116,6 +116,29 @@ agent-context adviser test                           # one small real call per a
 `adviser list` flags a client that is too old for the default model. `adviser
 test` uses each adviser's model and effort exactly as a task would.
 
+Add `--project my-project` to `adviser list`, `set`, `reset`, or `test`
+to inspect or change a registered project's choices. For example,
+`agent-context adviser set codex --project my-project --effort high` changes
+only that project's Codex effort. A project reset inherits the machine
+settings. An explicit `team-codex-model:` or `team-codex-effort:` line takes
+precedence for one task. Saved effort accepts low, medium, high, xhigh, max,
+and toolkit-default. Individual clients and models determine what they support.
+
+`review --wait` and `collect --wait` use `adviser_wait` (50 seconds).
+Use `--wait 300` for an individual longer review. The provider call timeout
+also caps the budget. A call returns within 90 seconds. If `wait_again`
+is true, repeat `collect` with the same wait option to use the remaining
+time. The deadline starts with the first wait for the phase. Workers enforce
+their idle timeout and terminal outcomes return immediately. One slot per
+provider is the default. Set `adviser_concurrency.codex` or
+`adviser_concurrency.claude` to allow up to four. Additional slots can
+increase usage. Adjust `adviser_cooldowns` by failure kind when needed.
+
+`agent-context adviser stats` counts busy outcomes and successful replies
+received after a wait expired or after the lead checkpointed. It samples
+retained assessments and their latest reviews. Timing counts use receipts
+written by versions that record reply arrival.
+
 Registered Git worktrees share project context. Separate projects and nested
 repositories remain isolated. Advisers are disabled for unregistered projects
 unless you explicitly enable a personal override.

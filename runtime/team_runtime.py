@@ -69,6 +69,7 @@ class Outcome(BaseModel):
     session_id: str = ""
     model: str = ""
     elapsed: float = 0.0
+    received_at: float = 0.0
     effort: str = ""
 
 
