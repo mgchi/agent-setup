@@ -127,6 +127,12 @@ class RefreshSource(BaseModel):
     mcp_server: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,80}$")
 
 
+class RefreshPermissions(BaseModel):
+    allow: list[str]
+    deny: list[str]
+    defaultMode: str = "dontAsk"
+
+
 class RefreshSettings(BaseModel):
     model_config = ConfigDict(extra="allow")
     enabled: bool = False
@@ -136,6 +142,7 @@ class RefreshSettings(BaseModel):
     github_user: str = ""
     stale_after_hours: float = Field(default=26, gt=0, le=8760)
     sources: dict[SourceName, RefreshSource] = Field(default_factory=dict)
+    permissions: RefreshPermissions | None = None
     model: str = Field(default="sonnet", pattern=r"^[\w./:-]{1,128}$")
     max_window_days: int = Field(default=7, ge=1, le=90)
     bootstrap_days: int = Field(default=14, ge=1, le=365)

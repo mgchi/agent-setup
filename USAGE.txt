@@ -66,6 +66,14 @@ Loaded context is sent to the hosted lead model you use. Privacy guards and
 sanitization reduce accidental disclosure; they cannot guarantee confidentiality.
 Review outgoing artifacts and tool inputs. Keep credentials out of memory.
 
+Operating settings
+
+Use agent-context config show to inspect operating values, defaults and bounds.
+Add --project sample to see a registered project's effective adviser choices.
+Use config set KEY VALUE or config reset KEY to edit the machine settings.
+Refresh permissions can live in refresh.permissions in that same file.
+The README lists supported keys and units.
+
 External-source refresh
 
 External refresh defaults off and is separate from daily local maintenance.

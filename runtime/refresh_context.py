@@ -19,7 +19,7 @@ from urllib.parse import unquote, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
-from context_store import RefreshSettings, atomic_text, clean, digest, linked_path, load_settings, lock, read_text, save_model
+from context_store import RefreshPermissions as Permissions, RefreshSettings, atomic_text, clean, digest, linked_path, load_settings, lock, read_text, save_model
 from refresh_health import SOURCE_NAMES, Outcome, Reason, RefreshState, SourceHealth, SourceName
 
 ROOT_FILES = ("brief.md", "people.md", "decisions.md", "inbox.md", "sources.md")
@@ -70,12 +70,6 @@ class SourceFailure(ValueError):
     def __init__(self, outcomes: dict[SourceName, Outcome], message: str):
         super().__init__(message)
         self.outcomes = outcomes
-
-
-class Permissions(BaseModel):
-    allow: list[str]
-    deny: list[str]
-    defaultMode: str = "dontAsk"
 
 
 class PermissionSettings(BaseModel):
@@ -434,7 +428,9 @@ class Connections(BaseModel):
 def connections(tools_root: Path, config: RefreshSettings) -> Connections:
     path = tools_root / "settings.json"
     permissions = PermissionSettings(permissions=Permissions(allow=[], deny=[]))
-    if path.exists():
+    if config.permissions is not None:
+        permissions = PermissionSettings(permissions=config.permissions.model_copy(deep=True))
+    elif path.exists():
         permissions = PermissionSettings.model_validate_json(path.read_text())
     wanted = config.servers()
     configured = MCPConfig()

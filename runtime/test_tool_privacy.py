@@ -130,7 +130,8 @@ class ToolPrivacyTests(unittest.TestCase):
                 self.assertEqual(guard(self.index, self.repo, name, payload), "")
 
     def test_setup_commands_run_from_inside_the_context_root(self) -> None:
-        for command in ("agent-context project list", "agent-context adviser list", "agent-context adviser reset codex"):
+        for command in ("agent-context project list", "agent-context adviser list", "agent-context adviser reset codex",
+                        "agent-context config show adviser_wait", "agent-context config set adviser_wait 60"):
             with self.subTest(command=command):
                 self.assertEqual(guard(self.index, self.context, "Bash", {"command": command}), "")
 

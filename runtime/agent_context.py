@@ -26,6 +26,7 @@ from context_store import (
     read_text, read_packet_source, save_model, sensitive_path,
 )
 from refresh_context import prune_logs
+from operating_config import ConfigError, change_config, show_config
 from team_runtime import ADVISER_DEFAULTS, FOLLOW_DEFAULT, Outcome, Provider, invoke, resolve_provider
 from disclosure import DisclosureError, DisclosureIndex, RawScanner, build_index, regular
 from tool_privacy import denial, guard, staged
@@ -1053,6 +1054,14 @@ def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     root.add_argument("--settings", type=Path, default=SETTINGS_PATH)
     commands = root.add_subparsers(dest="command", required=True)
+    config = commands.add_parser('config').add_subparsers(dest='config_command', required=True)
+    show = config.add_parser('show')
+    show.add_argument('key', nargs='?')
+    show.add_argument('--project')
+    configure = config.add_parser('set')
+    configure.add_argument('key')
+    configure.add_argument('value')
+    config.add_parser('reset').add_argument('key')
     project = commands.add_parser('project')
     project_commands = project.add_subparsers(dest='project_command', required=True)
     add = project_commands.add_parser('add')
@@ -1141,6 +1150,13 @@ def main() -> int:
                 migration_result = migrate_local.plan(options.manifest)
             print(json.dumps(migration_result, indent=2))
             return 0
+        if options.command == 'config':
+            if options.config_command == 'show':
+                values = show_config(options.settings, options.key, options.project)
+            else:
+                values = change_config(options.settings, options.key, getattr(options, 'value', None))
+            print(json.dumps(values, indent=2))
+            return 0
         if options.command == 'project':
             result = (add_project(options.settings, options.slug, options.path,
                                  advisers=None if options.advisers is None else options.advisers == 'on')
@@ -1220,7 +1236,10 @@ def main() -> int:
         if options.command == "hook":
             print(denial(error.category if isinstance(error, DisclosureError) else "hook-validation"))
             return 0
-        print(f"Operation failed ({error.category if isinstance(error, DisclosureError) else type(error).__name__}).", file=sys.stderr)
+        if isinstance(error, ConfigError):
+            print(str(error), file=sys.stderr)
+        else:
+            print(f"Operation failed ({error.category if isinstance(error, DisclosureError) else type(error).__name__}).", file=sys.stderr)
         return 1
 
 
