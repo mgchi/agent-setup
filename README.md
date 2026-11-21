@@ -330,6 +330,19 @@ not make hosted inference local. Adviser prompts are sanitized, and tool guards
 reduce accidental disclosure, but neither guarantees confidentiality. Review
 outgoing tool inputs, files, issues, pull requests, and messages.
 
+**Selected repository evidence is off by default.** A project owner can enable
+it with `agent-context project add my-project /path/to/repo --adviser-access
+selected-files`. For an individual review, add `--repo-file src/example.py`
+to the usual `agent-context review` command. Repeat the option for up to
+eight explicitly chosen files. The lead sends their committed UTF-8 text
+from one HEAD revision to the selected hosted providers. Review the named
+files and ensure the project permits sharing them before submitting.
+The combined evidence budget is 18,000 bytes when selecting repository files.
+Private roots, hidden paths, credentials, symlinks, and untracked files are
+ineligible. Advisers run tool-free in their existing isolated directories.
+Use `--diff` for eligible working changes or `--evidence` for a curated excerpt.
+Set `--adviser-access none` on the project to turn off file selection.
+
 Run review inputs belong in `<context-root>/local/runs/<run-id>/task-inputs/`.
 After capture, prefer a deletion-only patch to remove those individual regular
 files. A bare `rm -- <files>` is also supported, subject to the client's command

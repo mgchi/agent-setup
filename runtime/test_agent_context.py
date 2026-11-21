@@ -125,6 +125,40 @@ class WorkflowTests(unittest.TestCase):
         review(self.store, self.settings_path, run_id, "Candidate", request="Review safe behavior.")
         self.spawner.assert_called_once()
 
+    def test_selected_repository_evidence_reaches_review_only_with_both_opt_ins(self) -> None:
+        def git_command(*args):
+            subprocess.run(["git", "-C", str(self.cwd), *args], check=True, capture_output=True)
+        git_command("init", "-q")
+        atomic_text(self.cwd / "public code.py", "print('committed version')\n")
+        atomic_text(self.cwd / ".env.local", "synthetic fixture")
+        atomic_text(self.cwd / "notes.txt", "sk-" + "a" * 40)
+        atomic_text(self.cwd / "private/data.md", "Confidential")
+        atomic_text(self.cwd / "large.txt", "a" * 18001)
+        (self.cwd / "pointer").symlink_to("public code.py")
+        git_command("add", "--force", ".")
+        git_command("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "Fixture files")
+        self.store.settings.projects[0].privacy_roots = [self.cwd / "private"]
+        save_model(self.settings_path, self.store.settings)
+        run_id = self.start()
+        self.spawner.reset_mock()
+
+        def with_file(name):
+            return review(self.store, self.settings_path, run_id, "Review the change.", repo_files=[Path(name)])
+        with self.assertRaisesRegex(DisclosureError, "disabled"):
+            with_file("public code.py")
+        add_project(self.settings_path, "example", self.cwd, adviser_access="selected-files")
+        self.store = Store(load_settings(self.settings_path))
+        for name in (".env.local", "pointer", "private/data.md", "notes.txt", "../outside", "large.txt", "missing.txt"):
+            with self.subTest(name=name), self.assertRaises(DisclosureError):
+                with_file(name)
+        self.spawner.assert_not_called()
+        atomic_text(self.cwd / "public code.py", "uncommitted working copy")
+        result = with_file("public code.py")
+        bundle = json.loads((Path(result.directory) / f"input-{result.review.signature}.json").read_text())
+        self.assertIn("committed version", bundle["evidence"])
+        self.assertNotIn("working copy", bundle["evidence"])
+        self.spawner.assert_called_once()
+
     def test_review_scans_and_signs_complete_inputs(self) -> None:
         run_id = self.start()
         first = review(self.store, self.settings_path, run_id, "safe " * 3000 + "first")
