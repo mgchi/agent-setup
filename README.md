@@ -307,6 +307,13 @@ existing nonsymlink `refresh.resource_root`, your intended sources and
 connectors, and a separate schedule. Customize the local templates and retrieval
 scope first. Daily local maintenance and external-source refresh are separate.
 
+`agent-context status --cwd /path/to/project` shows the latest attempt, last
+full success, age in hours, and source outcomes for the refresh project. Its
+session briefing names failed sources and the next action. A daily schedule
+has two hours of grace by default. Set `refresh.stale_after_hours` to the
+expected interval plus grace for a different schedule. Existing refresh
+receipts have limited source detail until the next attempt.
+
 Installation does not authorize messages or changes in external services.
 
 ## Updates and recovery

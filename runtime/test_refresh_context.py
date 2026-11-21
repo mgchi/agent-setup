@@ -290,6 +290,38 @@ class RefreshTests(unittest.TestCase):
             self.assertEqual(main(), 0)
         run.assert_not_called()
 
+    def test_expired_source_surfaces_in_next_project_session(self) -> None:
+        checkout = self.base / "checkout"
+        checkout.mkdir()
+        store = Store(Settings(context_root=self.base / "store", projects=[
+            Project(slug="example", roots=[checkout])],
+            refresh=RefreshSettings(enabled=True, project="example")))
+        root = store.settings.project_root("example")
+        apply_snapshot(root, self.before, set())
+        previous = RefreshState(run_id="last", status="succeeded", started=time.time()-5000,
+                                completed=time.time()-4500, since=0, mode="bootstrap")
+        save_model(root / "local/refresh/success.json", previous)
+        atomic_text(self.tools / "prompt.md", "Custom local scope.")
+
+        def expired(stage, tools, prompt, *args):
+            self.assertIn("source-status.json", prompt)
+            manifest = self.manifest.model_copy(deep=True)
+            manifest.run_id = prompt.split("Run ID: ")[1].splitlines()[0]
+            manifest.sources[2] = SourceStatus(source="notion", status="needs-sign-in", detail="private diagnostic")
+            save_model(stage / "source-status.json", manifest)
+            return AgentResult(subtype="success", is_error=False)
+
+        github = GithubSnapshot(mine=[], review_requested=[], involving_user=[], merged_in_window=[], other_open=[])
+        with patch("refresh_context.github_snapshot", return_value=github), patch("refresh_context.run_agent", side_effect=expired):
+            with self.assertRaisesRegex(ValueError, "incomplete sources"):
+                refresh(root, self.tools, False)
+        health = store.status(checkout).refresh
+        self.assertEqual(health.sources["notion"].status, "needs-sign-in")
+        self.assertGreater(health.sources["notion"].last_success, 0)
+        self.assertNotIn("private diagnostic", health.model_dump_json())
+        self.assertIn("sign in to the connector", store.load(checkout).text)
+        self.assertIsNone(store.status(self.base).refresh)
+
     def test_enabled_refresh_requires_registered_project(self) -> None:
         for target in (None, "unregistered"):
             with self.subTest(target=target):

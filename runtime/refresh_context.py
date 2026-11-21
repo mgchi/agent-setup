@@ -20,10 +20,10 @@ from urllib.parse import unquote, urlsplit
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from context_store import atomic_text, clean, digest, linked_path, load_settings, lock, save_model
+from refresh_health import SOURCE_NAMES, Outcome, Reason, RefreshState, SourceHealth, SourceName
 
 ROOT_FILES = ("brief.md", "people.md", "decisions.md", "inbox.md", "sources.md")
 FOLDERS = ("projects", "customers", "meetings")
-SOURCE_NAMES = {"slack", "linear", "notion", "granola", "github"}
 MAX_BYTES = 2_000_000
 MEETING_DAYS = 90
 MEETING_COUNT = 160
@@ -42,8 +42,8 @@ class Snapshot(BaseModel):
 
 class SourceStatus(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    source: Literal["slack", "linear", "notion", "granola", "github"]
-    status: Literal["ok", "empty", "partial", "unavailable", "error"]
+    source: SourceName
+    status: Literal["ok", "empty", "partial", "unavailable", "error", "needs-sign-in", "truncated", "failed"]
     detail: str = Field(default="", max_length=600)
 
 
@@ -65,14 +65,10 @@ class Transaction(BaseModel):
     after: Snapshot
 
 
-class RefreshState(BaseModel):
-    run_id: str
-    status: Literal["succeeded", "failed"]
-    completed: float
-    started: float = 0
-    since: float
-    mode: str
-    detail: str = ""
+class SourceFailure(ValueError):
+    def __init__(self, outcomes: dict[SourceName, Outcome], message: str):
+        super().__init__(message)
+        self.outcomes = outcomes
 
 
 class Permissions(BaseModel):
@@ -162,9 +158,10 @@ def validate_stage(stage: Path, before: Snapshot, run_id: str, context_root: Pat
     manifest = SourceManifest.model_validate_json(status_path.read_text())
     if manifest.run_id != run_id or len(manifest.sources) != 5 or {item.source for item in manifest.sources} != SOURCE_NAMES:
         raise ValueError("Source manifest must cover this run and all five sources.")
-    failed = [item.source for item in manifest.sources if item.status not in {"ok", "empty"}]
+    failed = {item.source: {"partial": "truncated", "error": "failed"}.get(item.status, item.status)
+              for item in manifest.sources if item.status not in {"ok", "empty"}}
     if failed:
-        raise ValueError("Keeping the last valid digest; incomplete sources: " + ", ".join(failed))
+        raise SourceFailure(failed, "Keeping the last valid digest; incomplete sources: " + ", ".join(failed))
     value = snapshot(stage)
     old = {item.path: item.text for item in before.documents}
     contents = {item.path: item.text for item in value.documents}
@@ -338,7 +335,7 @@ def github_snapshot(since: str, repo: str, user: str) -> GithubSnapshot:
         if not isinstance(value, list):
             raise ValueError("GitHub returned an invalid snapshot.")
         if len(value) >= int(query[query.index("--limit") + 1]):
-            raise ValueError("GitHub snapshot reached its result cap; narrow or paginate the source before publishing.")
+            raise SourceFailure({"github": "truncated"}, "GitHub snapshot reached its result cap; narrow or paginate the source before publishing.")
         values.append(value)
     return GithubSnapshot(mine=values[0], review_requested=values[1], involving_user=values[2], merged_in_window=values[3], other_open=values[4])
 
@@ -368,7 +365,9 @@ def run_agent(stage: Path, tools_root: Path, prompt: str, budget: int, timeout: 
     configured = MCPConfig.model_validate_json((Path.home() / ".claude.json").read_text())
     selected = MCPConfig(mcpServers={key: value for key, value in configured.mcpServers.items() if key in {"slack", "linear-server", "notion", "granola"}})
     if len(selected.mcpServers) != 4:
-        raise ValueError("All four configured read-only MCP sources are required.")
+        missing = {"slack": "slack", "linear-server": "linear", "notion": "notion", "granola": "granola"}
+        raise SourceFailure({name: "unavailable" for server, name in missing.items() if server not in selected.mcpServers},
+                            "A configured read-only MCP source is unavailable.")
     with tempfile.TemporaryDirectory(prefix="config-", dir=tools_root) as configuration:
         config_root = Path(configuration)
         save_model(config_root / "settings.json", settings_for_stage(original, stage))
@@ -432,6 +431,7 @@ def refresh(root: Path, tools_root: Path, bootstrap: bool, *, github_repo: str =
             before = snapshot(root)
         last_file = root / "local/refresh/success.json"
         last = 0.0
+        previous = None
         if last_file.exists():
             previous = RefreshState.model_validate_json(last_file.read_text())
             last = previous.started or previous.since or max(0, previous.completed - 5400)
@@ -442,27 +442,54 @@ def refresh(root: Path, tools_root: Path, bootstrap: bool, *, github_repo: str =
         since = started - 14 * 86400 if mode == "bootstrap" else last - 3600
         budget, timeout = (40, 5400) if mode == "bootstrap" else (10, 2400)
         run_id = time.strftime("%Y-%m-%dT%H%M%S") + "-" + uuid.uuid4().hex[:8]
+        reason: Reason = "setup"
+        sources = {name: SourceHealth(last_success=previous.completed if previous else 0, through=last, since=since)
+                   for name in sorted(SOURCE_NAMES)}
         try:
             staging = tools_root / "staging"
             staging.mkdir(exist_ok=True, mode=0o700)
             with tempfile.TemporaryDirectory(prefix="staging-", dir=staging) as temporary:
                 stage = Path(temporary)
                 apply_snapshot(stage, before, set())
-                save_model(stage / ".cache/github.json", github_snapshot(dt.datetime.fromtimestamp(since).strftime("%Y-%m-%d"), github_repo, github_user))
+                reason = "source"
+                try:
+                    save_model(stage / ".cache/github.json", github_snapshot(dt.datetime.fromtimestamp(since).strftime("%Y-%m-%d"), github_repo, github_user))
+                except SourceFailure:
+                    raise
+                except (OSError, ValueError, subprocess.SubprocessError) as error:
+                    raise SourceFailure({"github": "failed"}, "GitHub collection failed.") from error
                 prompt = (f"Now: {dt.datetime.now().astimezone().isoformat()}\nWindow start: {dt.datetime.fromtimestamp(since).astimezone().isoformat()} (Unix {int(since)})\n"
-                          f"Mode: {mode}\nRun ID: {run_id}\nStaging directory: {stage}\n\n" + (tools_root / "prompt.md").read_text())
+                          f"Mode: {mode}\nRun ID: {run_id}\nStaging directory: {stage}\n\n" + (tools_root / "prompt.md").read_text()
+                          + "\nRequired runner output: also write source-status.json with run_id and a sources array. "
+                          "Give each of github, granola, linear, notion, slack exactly one entry with source and status. "
+                          "Use ok, empty, needs-sign-in, unavailable, truncated or failed. Never treat missing access as empty.")
+                reason = "agent"
                 result = run_agent(stage, tools_root, prompt, budget, timeout, logs / f"{run_id}.json", logs / f"{run_id}.err")
+                reason = "validation"
                 after = validate_stage(stage, before, run_id, root)
+                manifest = SourceManifest.model_validate_json((stage / "source-status.json").read_text())
+                reason = "publication"
                 publish(root, before, after, run_id)
-            state = RefreshState(run_id=run_id, status="succeeded", started=started, completed=time.time(), since=since, mode=mode, detail=f"cost=${result.total_cost_usd:.2f}")
+            for item in manifest.sources:
+                sources[item.source] = SourceHealth(status=item.status, last_success=started, through=started, since=since)
+            state = RefreshState(run_id=run_id, status="succeeded", started=started, completed=time.time(), since=since,
+                                 mode=mode, sources=sources, detail=f"cost=${result.total_cost_usd:.2f}")
             save_model(last_file, state)
             save_model(root / "local/refresh/latest.json", state)
             print(f"Context refresh succeeded: {run_id}; {state.detail}")
         except (OSError, ValueError, subprocess.SubprocessError) as error:
-            state = RefreshState(run_id=run_id, status="failed", started=started, completed=time.time(), since=since, mode=mode, detail=type(error).__name__)
+            if isinstance(error, SourceFailure):
+                reason = "source"
+                for name, outcome in error.outcomes.items():
+                    sources[name].status = outcome
+            elif isinstance(error, subprocess.TimeoutExpired):
+                reason = "timeout"
+            state = RefreshState(run_id=run_id, status="failed", started=started, completed=time.time(), since=since,
+                                 mode=mode, reason=reason, sources=sources)
             save_model(root / "local/refresh/latest.json", state)
             recovery = "publication recovery pending; saved snapshot retained" if (root / "local/refresh/pending.json").exists() else "last valid context retained"
-            print(f"Context refresh failed; {recovery}. {state.detail}")
+            details = ", ".join(f"{name} {item.status}" for name, item in sources.items() if item.status != "unknown")
+            print(f"Context refresh failed ({details or reason}); {recovery}.")
             raise
 
 
