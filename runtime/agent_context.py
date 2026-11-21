@@ -5,6 +5,7 @@ import concurrent.futures
 import contextlib
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -20,8 +21,8 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from context_store import (
-    Capture, Cooldown, Memory, Packet, Project, Scope, Session, Settings, Store, atomic_text,
-    clean, digest, direct_user_text, git, linked_path, load_settings, lock,
+    DEFAULT_COOLDOWNS, EFFORTS, AdviserOverride, Capture, Cooldown, Memory, Packet, Project, Scope, Session, Settings, Store, atomic_text,
+    clean, digest, direct_user_text, git, linked_path, load_settings, lock, modified,
     read_text, read_packet_source, save_model, sensitive_path,
 )
 from refresh_context import prune_logs
@@ -87,6 +88,22 @@ class Receipt(BaseModel):
     assessment: PhaseResult | None = None
     review: PhaseResult | None = None
     instruction: str = ""
+    wait_remaining_seconds: float = 0
+    wait_again: bool = False
+
+
+class WaitRecord(BaseModel):
+    started: float
+    deadline: float
+    expired_pending: bool = False
+
+
+class AdviserStats(BaseModel):
+    sampled_phases: int = 0
+    successful_replies: int = 0
+    busy: int = 0
+    successful_after_wait: int = 0
+    successful_after_checkpoint: int = 0
 
 
 class MemoryDraft(BaseModel):
@@ -155,6 +172,7 @@ class Adviser(BaseModel):
     client: str
     client_needed: str
     note: str = ""
+    project_fields: list[str] = Field(default_factory=list)
 
 
 class AdviserList(BaseModel):
@@ -214,44 +232,74 @@ def describe_adviser(provider: Provider) -> Adviser:
                    client=client, client_needed=default.client, note=note)
 
 
-def list_advisers(settings: Settings) -> AdviserList:
-    return AdviserList(advisers=[describe_adviser(provider) for provider in settings.providers
-                                 if provider.name in ADVISER_DEFAULTS])
+def adviser_project(settings: Settings, slug: str | None) -> Project | None:
+    project = settings.project(slug) if slug else None
+    if slug and project is None:
+        raise ValueError("Choose a registered project.")
+    return project
 
 
-def set_adviser(settings_path: Path, name: str, *, model: str | None = None, effort: str | None = None) -> AdviserList:
-    """Save a model or effort for one adviser or `all`; `toolkit-default` follows the toolkit."""
-    changes = {field: value for field, value in (("model", model), ("effort", effort)) if value is not None}
+def list_advisers(settings: Settings, slug: str | None = None) -> AdviserList:
+    project = adviser_project(settings, slug)
+    advisers = []
+    for provider in settings.project_providers(project):
+        if provider.name in ADVISER_DEFAULTS:
+            item = describe_adviser(provider)
+            if project and provider.name in project.adviser_overrides:
+                item.project_fields = list(project.adviser_overrides[provider.name].model_dump(exclude_none=True))
+            advisers.append(item)
+    return AdviserList(advisers=advisers)
+
+
+def set_adviser(settings_path: Path, name: str, *, model: str | None = None, effort: str | None = None,
+                slug: str | None = None, reset: bool = False) -> AdviserList:
+    changes = AdviserOverride(model=model, effort=effort).model_dump(exclude_none=True)
+    if reset:
+        changes = {"model": FOLLOW_DEFAULT, "effort": FOLLOW_DEFAULT}
     if not changes:
         raise ValueError("Give a model, an effort, or both.")
     with lock(settings_path.parent / 'install.lock'):
         settings = load_settings(settings_path)
+        project = adviser_project(settings, slug)
         chosen = [provider for provider in settings.providers if name in ("all", provider.name)]
         if not chosen:
             raise ValueError("That adviser is not configured.")
-        providers = [provider.model_copy(update=changes) if provider in chosen else provider
-                     for provider in settings.providers]
-        updated = Settings.model_validate({**settings.model_dump(), 'providers': [item.model_dump() for item in providers]})
+        updated = settings.model_copy(deep=True)
+        if project:
+            overrides = updated.project(slug).adviser_overrides
+            for provider in chosen:
+                if reset:
+                    overrides.pop(provider.name, None)
+                else:
+                    overrides[provider.name] = overrides.get(provider.name, AdviserOverride()).model_copy(update=changes)
+        else:
+            updated.providers = [provider.model_copy(update=changes) if provider in chosen else provider
+                                 for provider in settings.providers]
         if updated != settings:
-            save_model(settings_path, updated)
-    return list_advisers(updated)
+            save_model(settings_path, Settings.model_validate(updated.model_dump()))
+    return list_advisers(updated, slug)
 
 
-def check_advisers(store: Store, name: str) -> AdviserChecks:
-    """Make one small real call per adviser, the way a run would, and say what failed."""
+def check_advisers(store: Store, name: str, slug: str | None = None) -> AdviserChecks:
+    """Exercise the same effective model and effort as the selected project."""
     hints = {"unavailable": "The client did not accept this model or effort. The account may lack access, or the client may be too old.",
              "auth": "Sign in to the client again.", "quota": "The account has reached a usage limit.",
              "account-policy": "The account's policy does not allow this call."}
     schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"], "additionalProperties": False}
     checks: list[AdviserCheck] = []
-    for configured in store.settings.providers:
+    for configured in store.settings.project_providers(adviser_project(store.settings, slug)):
         if configured.name not in ADVISER_DEFAULTS or name not in ("all", configured.name):
             continue
         provider = resolve_provider(configured)
         # Outside the context store, so an interrupted check leaves nothing there.
         with tempfile.TemporaryDirectory(prefix="agent-context-check-") as directory:
-            outcome = invoke(provider, 'This is a connection check. Reply with {"ok": true}.', Path(directory) / "attempt",
-                             schema=schema, timeout=180, idle_timeout=120)
+            try:
+                with provider_slot(store, provider.name):
+                    outcome = invoke(provider, 'This is a connection check. Reply with {"ok": true}.', Path(directory) / "attempt",
+                                     schema=schema, timeout=store.settings.adviser_test_timeout,
+                                     idle_timeout=min(store.settings.adviser_test_timeout, store.settings.adviser_test_idle_timeout))
+            except BlockingIOError:
+                outcome = Outcome(ok=False, kind="busy", detail="All provider slots are in use.")
         note = ""
         if outcome.ok:
             # A model that now works should not wait out a cooldown from an earlier failure.
@@ -331,7 +379,7 @@ def select_providers(settings: Settings, scope: str, prompt: str) -> list[Provid
     selected: list[Provider] = []
     if choice == "off":
         return selected
-    for provider in settings.providers:
+    for provider in settings.project_providers(project):
         if choice in {"claude", "codex"} and provider.name != choice:
             continue
         models = re.findall(rf"(?im)^team-{provider.name}-model:\s*([\w./:-]+)\s*$", directive)
@@ -464,8 +512,8 @@ def receipt(store: Store, run_id: str, *, packet: Packet | None = None,
                    review=review_result,
                    instruction=f"Lead alone edits. Collect advice with {cli_command(settings_path)} collect --run {run_id}. "
                    f"Stage a sanitized request, candidate answer, and evidence under {directory / 'task-inputs'}. "
-                   f"Review once with --request-file and one --wait 50, then checkpoint durable memory or --none. "
-                   f"Send only sanitized task details to advisers. Pending advice does not require another wait. "
+                   f"Review once with --request-file and --wait. If wait_again is true, collect --wait resumes the same budget. "
+                   f"Then checkpoint durable memory or --none. Send only sanitized task details to advisers. "
                    f"Collaborator failure permits continuing with the lead; never change authentication or retention to repair it.")
 
 
@@ -473,9 +521,24 @@ def provider_identity(provider: Provider) -> str:
     return f"{provider.name}:{provider.model}:{provider.effort}"
 
 
-def cooldown_seconds(kind: str) -> int:
-    return {"account-policy": 86400, "quota": 3600, "auth": 86400,
-            "unavailable": 21600, "transient": 300, "timeout": 300}.get(kind, 300)
+def cooldown_seconds(kind: str, settings: Settings) -> int:
+    values = DEFAULT_COOLDOWNS | settings.adviser_cooldowns
+    return values.get(kind, values["default"])
+
+
+@contextlib.contextmanager
+def provider_slot(store: Store, name: str):
+    with contextlib.ExitStack() as stack:
+        for slot in range(store.settings.adviser_concurrency.get(name, 1)):
+            filename = f"provider-{name}.lock" if slot == 0 else f"provider-{name}-{slot}.lock"
+            try:
+                stack.enter_context(lock(store.local / filename, blocking=False))
+                break
+            except BlockingIOError:
+                continue
+        else:
+            raise BlockingIOError("All slots for this provider are in use.")
+        yield
 
 
 def call_provider(store: Store, provider: Provider, prompt: str, directory: Path) -> Outcome:
@@ -487,7 +550,7 @@ def call_provider(store: Store, provider: Provider, prompt: str, directory: Path
     deadline = time.monotonic() + store.settings.provider_wait
     while True:
         try:
-            with lock(store.local / f"provider-{provider.name}.lock", blocking=False):
+            with provider_slot(store, provider.name):
                 cached = store.cooldown(identity)
                 if cached:
                     return Outcome(ok=False, kind=cached.kind, detail="Provider is cooling down.", model=provider.model, effort=provider.effort)
@@ -517,7 +580,7 @@ def call_provider(store: Store, provider: Provider, prompt: str, directory: Path
                     time.sleep(1)
                 if not outcome.ok:
                     store.set_cooldown(Cooldown(identity=identity, kind=outcome.kind,
-                        detail="Provider attempt failed.", until=time.time() + cooldown_seconds(outcome.kind)))
+                        detail="Provider attempt failed.", until=time.time() + cooldown_seconds(outcome.kind, store.settings)))
                 return outcome
         except BlockingIOError:
             if time.monotonic() >= deadline:
@@ -573,6 +636,7 @@ def worker(store: Store, run_id: str, phase: Phase, signature: str) -> None:
                         outcome = future.result()
                     except Exception:
                         outcome = Outcome(ok=False, kind="worker-error", detail="Collaborator invocation failed.")
+                    outcome.received_at = time.time()
                     result.providers.append(provider.name)
                     result.outcomes.append(outcome)
                     save_model(destination, result)
@@ -596,6 +660,7 @@ def worker(store: Store, run_id: str, phase: Phase, signature: str) -> None:
                                 outcome = future.result()
                             except Exception:
                                 outcome = Outcome(ok=False, kind="worker-error", detail="Exchange invocation failed; independent advice remains available.")
+                            outcome.received_at = time.time()
                             result.exchange_providers.append(provider.name)
                             result.exchange_outcomes.append(outcome)
                             save_model(destination, result)
@@ -714,15 +779,71 @@ def reconcile(store: Store, run_id: str) -> None:
                 continue
 
 
-def collect(store: Store, run_id: str, wait: float = 0, *, settings_path: Path = SETTINGS_PATH) -> Receipt:
-    end = time.monotonic() + min(50, max(0, wait))
+def collect(store: Store, run_id: str, wait: float | None = 0, *, settings_path: Path = SETTINGS_PATH) -> Receipt:
+    seconds = store.settings.adviser_wait if wait is None else wait
+    if not math.isfinite(seconds):
+        raise ValueError("Wait must be finite.")
+    budget = min(store.settings.call_timeout, max(0, seconds))
+    record = None
     while True:
         reconcile(store, run_id)
         result = receipt(store, run_id, settings_path=settings_path)
         phases = [phase for phase in (result.assessment, result.review) if phase]
-        if all(phase.status == "complete" for phase in phases) or time.monotonic() >= end:
+        if all(phase.status == "complete" for phase in phases) or not budget:
             return result
-        time.sleep(0.2)
+        if record is None:
+            phase = result.review or result.assessment
+            path = run_path(store, run_id) / f"wait-{phase.phase}-{phase.signature}.json"
+            with lock(path.with_suffix(".lock")):
+                now = time.time()
+                record = WaitRecord.model_validate_json(read_text(path)) if path.exists() else WaitRecord(started=now, deadline=now)
+                record.deadline = max(record.deadline, record.started + budget)
+                save_model(path, record)
+            end = time.monotonic() + min(90, budget)
+        remaining = min(record.deadline - time.time(), end - time.monotonic())
+        if remaining <= 0:
+            result.wait_remaining_seconds = round(max(0, record.deadline - time.time()), 2)
+            result.wait_again = result.wait_remaining_seconds > 0
+            if not result.wait_again:
+                with lock(path.with_suffix(".lock")):
+                    current = WaitRecord.model_validate_json(read_text(path))
+                    if time.time() >= current.deadline:
+                        current.expired_pending = True
+                        save_model(path, current)
+            return result
+        time.sleep(min(0.2, remaining))
+
+
+def adviser_stats(store: Store, slug: str | None = None) -> AdviserStats:
+    adviser_project(store.settings, slug)
+    totals = AdviserStats()
+    runs = sorted((store.local / "runs").glob("run-*"), key=modified, reverse=True)
+    for directory in runs[:store.settings.max_runs]:
+        try:
+            run = read_run(store, directory.name)
+            if slug and run.scope != slug:
+                continue
+            checkpoint = json.loads(read_text(directory / "checkpoint.json") or "{}").get("completed", 0)
+            latest = read_text(directory / "latest-review", 100)
+            phases = [("assessment", run.prompt_hash)]
+            if re.fullmatch(r"[a-f0-9]{64}", latest):
+                phases.append(("review", latest))
+            for phase, signature in phases:
+                result = phase_state(store, run.run_id, phase, signature)
+                if result is None:
+                    continue
+                totals.sampled_phases += 1
+                waited = read_text(directory / f"wait-{phase}-{signature}.json")
+                record = WaitRecord.model_validate_json(waited) if waited else None
+                for reply in [*result.outcomes, *result.exchange_outcomes]:
+                    totals.busy += int(reply.kind == "busy")
+                    if reply.ok:
+                        totals.successful_replies += 1
+                        totals.successful_after_checkpoint += int(bool(checkpoint and reply.received_at > checkpoint))
+                        totals.successful_after_wait += int(bool(record and record.expired_pending and reply.received_at > record.deadline))
+        except (OSError, ValueError):
+            continue  # Retention can remove a run while statistics are being read.
+    return totals
 
 
 def packet_source_state(store: Store, packet: Packet) -> dict[str, str]:
@@ -896,8 +1017,8 @@ def hook(store: Store, settings_path: Path, event: HookInput, client: str) -> st
         return ""
     store.set_session(previous.model_copy(update={"continued": True, "updated": time.time()}))
     reason = (f"{CONTINUATION} Finish the existing run {run.run_id}: collect available assessment/review with "
-              f"{cli_command(settings_path)} collect --run {run.run_id} --wait 40; address material findings using your judgment. "
-              "Wait at most once. Pending or failed providers do not block completion. Do not launch an automatic review from this reminder. "
+              f"{cli_command(settings_path)} collect --run {run.run_id} --wait; address material findings using your judgment. "
+              "Use the same wait budget. Pending or failed providers permit completion. Do not launch an automatic review from this reminder. "
               "Checkpoint only explicit durable preferences, accepted decisions, or verified reusable lessons; "
               f"otherwise run {cli_command(settings_path)} checkpoint --run {run.run_id} --none. "
               "Then restate the complete final answer, because some clients show only the last message of a turn. "
@@ -941,13 +1062,17 @@ def parser() -> argparse.ArgumentParser:
     project_commands.add_parser('list')
     adviser = commands.add_parser('adviser')
     adviser_commands = adviser.add_subparsers(dest='adviser_command', required=True)
-    adviser_commands.add_parser('list')
+    adviser_commands.add_parser('list').add_argument('--project')
+    adviser_commands.add_parser('stats').add_argument('--project')
     change = adviser_commands.add_parser('set')
     change.add_argument('name', choices=[*ADVISER_DEFAULTS])
     change.add_argument('--model', type=setting(r"[\w./:-]+"), help='A model ID your account supports. Use "adviser reset" to follow the toolkit again.')
-    change.add_argument('--effort', type=setting(r"[a-z-]+"), help='An effort level the client accepts.')
+    change.add_argument('--effort', choices=EFFORTS)
+    change.add_argument('--project')
     for name in ('reset', 'test'):
-        adviser_commands.add_parser(name).add_argument('name', choices=[*ADVISER_DEFAULTS, 'all'], nargs='?', default='all')
+        subcommand = adviser_commands.add_parser(name)
+        subcommand.add_argument('name', choices=[*ADVISER_DEFAULTS, 'all'], nargs='?', default='all')
+        subcommand.add_argument('--project')
     migration = commands.add_parser('migrate')
     migration.add_argument('manifest', type=Path, nargs='?')
     migration.add_argument('--apply', action='store_true')
@@ -974,7 +1099,8 @@ def parser() -> argparse.ArgumentParser:
         if name in {"collect", "review", "checkpoint", "remember", "refresh", "finish", "worker"}:
             command.add_argument("--run", required=True)
         if name in {"collect", "review"}:
-            command.add_argument("--wait", type=float, default=0)
+            command.add_argument("--wait", type=float, nargs="?", const=None, default=0,
+                                 help="Wait for the configured budget or an explicit number of seconds.")
         if name == "review":
             command.add_argument("--answer-file", type=Path, required=True)
             command.add_argument("--request-file", type=Path)
@@ -1023,16 +1149,19 @@ def main() -> int:
             print(result.model_dump_json(indent=2))
             return 0
         if options.command == 'adviser':
+            if options.adviser_command == 'stats':
+                print(adviser_stats(Store(load_settings(options.settings)), options.project).model_dump_json(indent=2))
+                return 0
             if options.adviser_command == 'test':
-                checks = check_advisers(Store(load_settings(options.settings)), options.name)
+                checks = check_advisers(Store(load_settings(options.settings)), options.name, options.project)
                 print(checks.model_dump_json(indent=2))
                 return 0 if all(check.ok for check in checks.checks) else 1
             if options.adviser_command == 'list':
-                advisers = list_advisers(load_settings(options.settings))
+                advisers = list_advisers(load_settings(options.settings), options.project)
             elif options.adviser_command == 'reset':
-                advisers = set_adviser(options.settings, options.name, model=FOLLOW_DEFAULT, effort=FOLLOW_DEFAULT)
+                advisers = set_adviser(options.settings, options.name, slug=options.project, reset=True)
             else:
-                advisers = set_adviser(options.settings, options.name, model=options.model, effort=options.effort)
+                advisers = set_adviser(options.settings, options.name, model=options.model, effort=options.effort, slug=options.project)
             print(advisers.model_dump_json(indent=2))
             return 0
         store = Store(load_settings(options.settings))

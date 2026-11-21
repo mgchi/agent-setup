@@ -17,7 +17,7 @@ from context_store import Capture, Cooldown, LocalAdapter, Memory, Project, Sett
 from agent_context import (
     CONTINUATION, Advice, CheckpointInput, HookInput, MemoryDraft, PhaseResult,
     add_project, begin, call_provider, check_advisers, checkpoint, collect, hook, list_advisers, main, parser, read_run, release,
-    client_version, review, run_adapter, run_path, set_adviser, worker,
+    adviser_stats, client_version, cooldown_seconds, provider_slot, review, run_adapter, run_path, select_providers, set_adviser, worker,
 )
 from disclosure import DisclosureError
 from team_runtime import ADVISER_DEFAULTS, Outcome, Provider
@@ -42,6 +42,53 @@ class WorkflowTests(unittest.TestCase):
     def start(self, prompt: str = "Plan the database migration.", turn: str = "") -> str:
         return begin(self.store, self.settings_path, self.cwd, prompt,
                      client="codex", session="session", turn=turn).run_id
+
+    def test_project_overrides_inherit_reset_and_prompt_precedence(self) -> None:
+        save_model(self.settings_path, self.store.settings)
+        with patch("agent_context.client_version", return_value=""):
+            set_adviser(self.settings_path, "codex", model="global", effort="medium")
+            result = set_adviser(self.settings_path, "codex", effort="high", slug="example")
+            self.assertEqual(result.advisers[1].project_fields, ["effort"])
+            settings = load_settings(self.settings_path)
+            effective = select_providers(settings, "example", "team: codex")[0]
+            self.assertEqual((effective.model, effective.effort), ("global", "high"))
+            self.assertEqual(select_providers(settings, "example", "team: codex\nteam-codex-effort: low")[0].effort, "low")
+            before = self.settings_path.read_bytes()
+            with self.assertRaises(ValueError):
+                set_adviser(self.settings_path, "codex", effort="hihg")
+            self.assertEqual(before, self.settings_path.read_bytes())
+            result = set_adviser(self.settings_path, "codex", reset=True, slug="example")
+            self.assertEqual((result.advisers[1].effort, result.advisers[1].project_fields), ("medium", []))
+
+    def test_slot_limit_preserves_first_lock_and_custom_cooldown(self) -> None:
+        self.store.settings.adviser_concurrency = {"codex": 2}
+        self.store.settings.adviser_cooldowns = {"quota": 1800}
+        with lock(self.store.local / "provider-codex.lock"), provider_slot(self.store, "codex"):
+            with self.assertRaises(BlockingIOError), provider_slot(self.store, "codex"):
+                self.fail("overbooked")
+            with provider_slot(self.store, "claude"):
+                self.assertEqual(cooldown_seconds("quota", self.store.settings), 1800)
+
+    def test_long_wait_resumes_one_deadline_and_counts_late_and_busy_outcomes(self) -> None:
+        run_id = self.start()
+        directory = run_path(self.store, run_id)
+        now = [time.time()]
+        self.store.settings.adviser_wait = 300
+        def advance(seconds):
+            now[0] += seconds
+        with lock(directory / "assessment.lock"), patch("agent_context.time.time", side_effect=lambda: now[0]), \
+                patch("agent_context.time.monotonic", side_effect=lambda: now[0]), patch("agent_context.time.sleep", side_effect=advance):
+            for remaining in (210, 120, 30, 0):
+                result = collect(self.store, run_id, None)
+                self.assertEqual(result.wait_again, bool(remaining))
+                self.assertAlmostEqual(result.wait_remaining_seconds, remaining, places=2)
+            done = result.assessment.model_copy(update={"status": "complete", "outcomes": [
+                Outcome(ok=True, received_at=now[0]+2), Outcome(ok=False, kind="busy")]})
+            save_model(directory / "assessment.json", done)
+            atomic_text(directory / "checkpoint.json", json.dumps({"completed": now[0]+1}))
+            self.assertFalse(collect(self.store, run_id, None).wait_again)
+        stats = adviser_stats(self.store, "example")
+        self.assertEqual((stats.successful_replies, stats.busy, stats.successful_after_wait, stats.successful_after_checkpoint), (1, 1, 1, 1))
 
     def event(self, name: str, **values: object) -> HookInput:
         return HookInput.model_validate({"session_id": "session", "cwd": str(self.cwd),

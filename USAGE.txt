@@ -41,6 +41,11 @@ Entry hooks load a small personal and project context packet. The lead owns edit
 and validation. Independent advisers use the toolkit's default Claude and Codex
 models at maximum effort. agent-context adviser list shows them, adviser set
 chooses others your account supports, and adviser test checks that they work.
+Use --project with adviser list, set, reset or test for a project override.
+Review --wait uses the configured 50-second default. For a longer wait, pass
+--wait 300. If wait_again is true, collect with the same wait option to resume
+the original deadline. Adviser stats reports late replies and busy outcomes
+for retained runs. The default concurrency is one slot per provider.
 Workers receive sanitized task, candidate, and evidence text. Bounded waits and
 graceful handling of failures and usage limits let the lead continue. Claude
 workers disable session persistence; Codex workers use ephemeral sessions.

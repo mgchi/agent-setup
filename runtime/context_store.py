@@ -15,7 +15,7 @@ import tempfile
 import time
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
 
@@ -23,6 +23,18 @@ from refresh_health import SOURCE_NAMES, RefreshHealth, RefreshState, SourceName
 from team_runtime import ADVISER_DEFAULTS, FOLLOW_DEFAULT, Provider, redact_text, resolve_provider
 
 Scope = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$", max_length=48)]
+AdviserName = Literal["claude", "codex"]
+Effort = Literal["low", "medium", "high", "xhigh", "max", "toolkit-default"]
+EFFORTS = get_args(Effort)
+CooldownKind = Literal["account-policy", "quota", "auth", "unavailable", "transient", "timeout", "default"]
+DEFAULT_COOLDOWNS = {"account-policy": 86400, "quota": 3600, "auth": 86400,
+                     "unavailable": 21600, "transient": 300, "timeout": 300, "default": 300}
+
+
+class AdviserOverride(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    model: str | None = Field(default=None, pattern=r"^[\w./:-]{1,128}$")
+    effort: Effort | None = None
 
 
 class Project(BaseModel):
@@ -39,6 +51,7 @@ class Project(BaseModel):
     context_dir: Path | None = None
     private_github_repository: str = ""
     advisers: bool = True
+    adviser_overrides: dict[AdviserName, AdviserOverride] = Field(default_factory=dict)
     collaboration: Literal["advisory", "exchange"] = "advisory"
 
     @field_validator("slug")
@@ -192,6 +205,11 @@ class Settings(BaseModel):
     call_timeout: int = Field(default=480, ge=1, le=1200)
     idle_timeout: int = Field(default=180, ge=1, le=600)
     provider_wait: int = Field(default=20, ge=0, le=60)
+    adviser_wait: int = Field(default=50, ge=0, le=1200)
+    adviser_concurrency: dict[AdviserName, Annotated[int, Field(ge=1, le=4)]] = Field(default_factory=dict)
+    adviser_cooldowns: dict[CooldownKind, Annotated[int, Field(ge=0, le=604800)]] = Field(default_factory=dict)
+    adviser_test_timeout: int = Field(default=180, ge=1, le=1200)
+    adviser_test_idle_timeout: int = Field(default=120, ge=1, le=600)
     capture_days: int = Field(default=7, ge=1, le=30)
     run_days: int = Field(default=14, ge=1, le=60)
     max_runs: int = Field(default=32, ge=1, le=100)
@@ -243,6 +261,11 @@ class Settings(BaseModel):
 
     def project(self, scope: str) -> Project | None:
         return next((project for project in self.projects if project.slug == scope), None)
+
+    def project_providers(self, project: Project | None) -> list[Provider]:
+        overrides = project.adviser_overrides if project else {}
+        return [provider.model_copy(update=overrides[provider.name].model_dump(exclude_none=True))
+                if provider.name in overrides else provider for provider in self.providers]
 
     def project_root(self, scope: str) -> Path:
         project = self.project(scope)
