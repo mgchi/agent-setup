@@ -71,6 +71,10 @@ schedule. Customize the local refresh templates and scope before enabling it.
 Check agent-context status in the refresh project for the last attempt, last
 success, and source health. The session briefing reports failures and overdue
 refreshes. Set refresh.stale_after_hours to match the schedule plus grace.
+Set refresh.sources.<name>.enabled to choose sources. Each enabled source
+catches up from its last published interval, at most seven days per run by
+default. Healthy sources publish dated notes during an outage. Rerun the job
+to advance another interval. The combined brief updates after full coverage.
 Installation does not transfer connector authentication or authorize messages
 or changes in external services.
 

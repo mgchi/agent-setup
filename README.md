@@ -314,6 +314,34 @@ has two hours of grace by default. Set `refresh.stale_after_hours` to the
 expected interval plus grace for a different schedule. Existing refresh
 receipts have limited source detail until the next attempt.
 
+Omitted sources keep their defaults. For example, this part of the machine
+settings disables Slack and selects a different Notion server name:
+
+```json
+{"refresh": {"sources": {"slack": {"enabled": false}, "notion": {"mcp_server": "notes"}}}}
+```
+
+Use each selected MCP server's existing client registration and grant its
+intended read tools in the refresh resource directory's permission file.
+GitHub uses the authenticated `gh` CLI. Configure `refresh.github_repo` and
+`refresh.github_user` when GitHub is enabled. Disabled sources require no
+credentials. A missing connector or allowance is reported as unavailable.
+
+Each run processes up to `refresh.max_window_days` (7) of missed history
+per source, starting with its oldest uncovered interval. Rerun the refresh
+job to catch up sooner. Open pull requests use a separate paginated inventory.
+A full search is split by time. An exhausted collection limit leaves that
+source incomplete. Complete sources publish dated notes in `source-updates/`.
+During partial coverage the previous combined digest and failed sources' notes
+are preserved. The session reads the dated updates alongside them. When all
+enabled sources catch up, the combined digest can be refreshed. Publication
+commits the notes and their coverage together.
+
+The refresh model defaults to `sonnet`. Bootstrap and incremental runs have
+separate USD budgets and timeouts in seconds. Bootstrap starts with 14 days
+of history. Source selection, model, budgets, timeouts, inventory size, catch-up
+window, and meeting retention are machine settings.
+
 Installation does not authorize messages or changes in external services.
 
 ## Updates and recovery
