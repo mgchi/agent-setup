@@ -46,6 +46,9 @@ Review --wait uses the configured 50-second default. For a longer wait, pass
 --wait 300. If wait_again is true, collect with the same wait option to resume
 the original deadline. Adviser stats reports late replies and busy outcomes
 for retained runs. The default concurrency is one slot per provider.
+Projects can opt in to selected committed files with project add --adviser-access
+selected-files. A review sends a file only when the lead includes --repo-file
+with its repository-relative path. Inspect that content before sharing it.
 Workers receive sanitized task, candidate, and evidence text. Bounded waits and
 graceful handling of failures and usage limits let the lead continue. Claude
 workers disable session persistence; Codex workers use ephemeral sessions.

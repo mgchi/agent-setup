@@ -52,6 +52,7 @@ class Project(BaseModel):
     private_github_repository: str = ""
     advisers: bool = True
     adviser_overrides: dict[AdviserName, AdviserOverride] = Field(default_factory=dict)
+    adviser_access: Literal["none", "selected-files"] = "none"
     collaboration: Literal["advisory", "exchange"] = "advisory"
 
     @field_validator("slug")

@@ -87,7 +87,10 @@ def show_config(path: Path, key: str | None = None, project: str | None = None) 
                                    overridden=getattr(effective, field) != default,
                                    bounds={"enum": list(EFFORTS)} if field == "effort" else {}).model_dump()
         advisers[configured.name] = fields
-    return {"settings": {key: value.model_dump() for key, value in catalog.items()}, "advisers": advisers}
+    result = {"settings": {key: value.model_dump() for key, value in catalog.items()}, "advisers": advisers}
+    if scope:
+        result["adviser_access"] = scope.adviser_access
+    return result
 
 
 def change_config(path: Path, key: str, argument: str | None) -> dict:

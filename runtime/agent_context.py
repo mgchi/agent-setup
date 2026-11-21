@@ -27,6 +27,7 @@ from context_store import (
 )
 from refresh_context import prune_logs
 from operating_config import ConfigError, change_config, show_config
+from repository_evidence import selected_files
 from team_runtime import ADVISER_DEFAULTS, FOLLOW_DEFAULT, Outcome, Provider, invoke, resolve_provider
 from disclosure import DisclosureError, DisclosureIndex, RawScanner, build_index, regular
 from tool_privacy import denial, guard, staged
@@ -129,7 +130,8 @@ class ProjectList(BaseModel):
     projects: list[Project]
 
 
-def add_project(settings_path: Path, slug: str, path: Path, *, advisers: bool | None = None) -> Project:
+def add_project(settings_path: Path, slug: str, path: Path, *, advisers: bool | None = None,
+                adviser_access: Literal["none", "selected-files"] | None = None) -> Project:
     path = path.expanduser()
     if linked_path(path) or not path.is_dir():
         raise ValueError("Choose an existing project directory without symlinks.")
@@ -147,6 +149,8 @@ def add_project(settings_path: Path, slug: str, path: Path, *, advisers: bool | 
                 "common_dirs": [*current.common_dirs, *registration.common_dirs]})
         if advisers is not None:
             registration = registration.model_copy(update={"advisers": advisers})
+        if adviser_access is not None:
+            registration = Project.model_validate({**registration.model_dump(), "adviser_access": adviser_access})
         projects = [project for project in settings.projects if project.slug != slug]
         updated = Settings.model_validate({**settings.model_dump(), 'projects': [*projects, registration]})
         root = updated.project_root(slug)
@@ -719,7 +723,7 @@ def evidence_text(paths: list[Path], disclosure: DisclosureIndex | None = None) 
 
 def review(store: Store, settings_path: Path, run_id: str, final: str, *,
            evidence: list[Path] | None = None, include_diff: bool = False,
-           request: str | None = None) -> Receipt:
+           request: str | None = None, repo_files: list[Path] | None = None) -> Receipt:
     run = read_run(store, run_id)
     directory = run_path(store, run_id)
     disclosure = disclosure_index(store)
@@ -732,6 +736,15 @@ def review(store: Store, settings_path: Path, run_id: str, final: str, *,
     text = evidence_text(evidence or [], disclosure)
     if include_diff:
         text = text + "\n" + safe_diff(run.cwd, disclosure)
+    if repo_files:
+        top = git(run.cwd, ["rev-parse", "--show-toplevel"])
+        project = store.settings.project(run.scope)
+        if not top or project is None or store.scope(Path(top)) != run.scope:
+            raise DisclosureError("repository-evidence-needs-project")
+        files = selected_files(Path(top), project, repo_files, disclosure)
+        text = "\n\n".join(part for part in (text, files) if part)
+        if len(text.encode("utf-8")) > 18000:
+            raise DisclosureError("repository-evidence-size")
     candidate = clean(final, 12000)
     signature = digest(json.dumps([full_request, final, text, run.model_dump_json()]))
     with lock(store.local / "cleanup.lock"), lock(directory / "review-submit.lock"):
@@ -1068,6 +1081,7 @@ def parser() -> argparse.ArgumentParser:
     add.add_argument('slug')
     add.add_argument('path', type=Path)
     add.add_argument('--advisers', choices=['on', 'off'], help='Set automatic advice for this project; omission preserves the existing choice.')
+    add.add_argument('--adviser-access', choices=['none', 'selected-files'])
     project_commands.add_parser('list')
     adviser = commands.add_parser('adviser')
     adviser_commands = adviser.add_subparsers(dest='adviser_command', required=True)
@@ -1115,6 +1129,8 @@ def parser() -> argparse.ArgumentParser:
             command.add_argument("--request-file", type=Path)
             command.add_argument("--evidence", type=Path, action="append", default=[])
             command.add_argument("--diff", action="store_true")
+            command.add_argument("--repo-file", type=Path, action="append", default=[],
+                                 help="Send this explicitly selected repository-relative file from HEAD.")
         if name in {"checkpoint", "remember"}:
             group = command.add_mutually_exclusive_group(required=True)
             group.add_argument("--file", type=Path)
@@ -1159,7 +1175,7 @@ def main() -> int:
             return 0
         if options.command == 'project':
             result = (add_project(options.settings, options.slug, options.path,
-                                 advisers=None if options.advisers is None else options.advisers == 'on')
+                                 advisers=None if options.advisers is None else options.advisers == 'on', adviser_access=options.adviser_access)
                       if options.project_command == 'add'
                       else ProjectList(projects=load_settings(options.settings).projects))
             print(result.model_dump_json(indent=2))
@@ -1200,7 +1216,7 @@ def main() -> int:
             output = collect(store, options.run, options.wait, settings_path=options.settings)
         elif options.command == "review":
             review(store, options.settings, options.run, complete_text(options.answer_file),
-                   evidence=options.evidence, include_diff=options.diff,
+                   evidence=options.evidence, include_diff=options.diff, repo_files=options.repo_file,
                    request=complete_text(options.request_file) if options.request_file else None)
             output = collect(store, options.run, options.wait, settings_path=options.settings)
         elif options.command in {"checkpoint", "remember"}:
