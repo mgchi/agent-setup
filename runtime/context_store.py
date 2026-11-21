@@ -19,6 +19,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
 
+from refresh_health import RefreshHealth, RefreshState, summarize
 from team_runtime import ADVISER_DEFAULTS, FOLLOW_DEFAULT, Provider, redact_text, resolve_provider
 
 Scope = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$", max_length=48)]
@@ -114,6 +115,7 @@ class RefreshSettings(BaseModel):
     resource_root: Path | None = None
     github_repo: str = ""
     github_user: str = ""
+    stale_after_hours: float = Field(default=26, gt=0, le=8760)
 
     @field_validator("resource_root")
     @classmethod
@@ -297,6 +299,7 @@ class StoreStatus(BaseModel):
     installation_revision: str = ""
     installation_dirty_source: bool = False
     modified_runtime_files: list[str] = Field(default_factory=list)
+    refresh: RefreshHealth | None = None
 
 
 class CleanupResult(BaseModel):
@@ -963,7 +966,22 @@ class Store:
                            memory_kinds=kinds, review_due_count=due, retained_runs=len(runs),
                            checkpointed_runs=sum((path / "checkpoint.json").is_file() for path in runs),
                            packet_chars=len(packet.text), omitted_sources=packet.omitted_sources, warnings=packet.warnings, sources=packet.source_receipts,
-                           installation_revision=manifest.get("revision", ""), installation_dirty_source=manifest.get("source_dirty", False), modified_runtime_files=drift)
+                           installation_revision=manifest.get("revision", ""), installation_dirty_source=manifest.get("source_dirty", False), modified_runtime_files=drift,
+                           refresh=self.refresh_health(packet.scope))
+
+    def refresh_health(self, scope: str) -> RefreshHealth | None:
+        config = self.settings.refresh
+        if not config.enabled or config.project != scope:
+            return None
+        root = self.settings.project_root(scope) / "local/refresh"
+        try:
+            states = []
+            for name in ("latest.json", "success.json"):
+                path = root / name
+                states.append(RefreshState.model_validate_json(read_text(path, 16384)) if path.exists() else None)
+            return summarize(*states, time.time(), config.stale_after_hours)
+        except (OSError, ValueError):
+            return RefreshHealth(status="unreadable", warning="External refresh: health record unreadable. Check the refresh job.")
 
     def load(self, cwd: Path, query: str = "") -> Packet:
         scope = self.scope(cwd, query)
@@ -985,6 +1003,9 @@ class Store:
         project_root = self.settings.project_root(scope)
         complete_digest = not (project_root / "local/refresh/pending.json").exists()
         warning = revision_warning
+        health = self.refresh_health(scope)
+        if health and health.warning:
+            warning = (warning + " " + health.warning).strip()
         if scope != "personal":
             names = ["context.md", "playbook.md"]
             if complete_digest:

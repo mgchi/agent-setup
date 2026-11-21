@@ -68,6 +68,9 @@ Supported sources are Slack, Linear, Notion, Granola, and GitHub. To enable it,
 configure a registered refresh.project, an existing nonsymlink
 refresh.resource_root, the intended sources and connectors, and a separate
 schedule. Customize the local refresh templates and scope before enabling it.
+Check agent-context status in the refresh project for the last attempt, last
+success, and source health. The session briefing reports failures and overdue
+refreshes. Set refresh.stale_after_hours to match the schedule plus grace.
 Installation does not transfer connector authentication or authorize messages
 or changes in external services.
 
