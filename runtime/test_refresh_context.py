@@ -16,7 +16,7 @@ from context_store import Project, RefreshSettings, Settings, Store, atomic_text
 from refresh_context import (
     AgentResult, Document, GithubSnapshot, Permissions, PermissionSettings,
     RefreshState, Snapshot, SourceManifest, SourceStatus, Transaction,
-    allowed_document, apply_snapshot, github_snapshot, local_references,
+    allowed_document, apply_snapshot, connections, github_history, github_snapshot, local_references,
     main, merge_inbox, publish, recover, refresh, retain_meetings, run_agent,
     settings_for_stage, snapshot, validate_stage,
 )
@@ -31,6 +31,12 @@ class RefreshTests(unittest.TestCase):
         self.stage = self.base / "stage"
         self.tools = self.base / "tools"
         self.tools.mkdir()
+        fake_home = self.base / "client"
+        self.enterContext(patch("refresh_context.Path.home", return_value=fake_home))
+        servers = ["slack", "linear-server", "notion", "granola"]
+        atomic_text(fake_home / ".claude.json", json.dumps({"mcpServers": {s: {} for s in servers}}))
+        save_model(self.tools / "settings.json", PermissionSettings(permissions=Permissions(
+            allow=[f"mcp__{s}__read" for s in servers], deny=["Bash"])))
         self.before = Snapshot(documents=[
             Document(path="brief.md", text="# Brief\nOld brief\n"),
             Document(path="people.md", text="# People\n"),
@@ -41,7 +47,7 @@ class RefreshTests(unittest.TestCase):
         apply_snapshot(self.root, self.before, set())
         apply_snapshot(self.stage, self.before, set())
         self.manifest = SourceManifest(run_id="test", sources=[
-            SourceStatus(source=name, status="ok")
+            SourceStatus(source=name, status="empty")
             for name in ("slack", "linear", "notion", "granola", "github")
         ])
         save_model(self.stage / "source-status.json", self.manifest)
@@ -145,12 +151,11 @@ class RefreshTests(unittest.TestCase):
             value = self.manifest.model_copy(deep=True)
             value.sources[0] = SourceStatus(source="slack", status=bad)
             save_model(self.stage / "source-status.json", value)
-            with self.assertRaisesRegex(ValueError, "incomplete sources"):
-                validate_stage(self.stage, self.before, "test")
+            self.assertEqual(validate_stage(self.stage, self.before, "test"), self.before)
         value.sources[0] = SourceStatus(source="slack", status="empty")
         save_model(self.stage / "source-status.json", value)
         self.assertEqual(validate_stage(self.stage, self.before, "test"), self.before)
-        with self.assertRaisesRegex(ValueError, "all five sources"):
+        with self.assertRaisesRegex(ValueError, "requested sources"):
             validate_stage(self.stage, self.before, "wrong-run")
         value.sources[0] = value.sources[1]
         save_model(self.stage / "source-status.json", value)
@@ -204,11 +209,28 @@ class RefreshTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "160 meetings"):
             retain_meetings(Snapshot(documents=[brief, *meetings]), today)
 
-    def test_github_cap_is_a_failure(self) -> None:
-        result = subprocess.CompletedProcess(["gh"], 0, json.dumps([{}] * 50), "")
-        with patch("refresh_context.command", return_value=result):
-            with self.assertRaisesRegex(ValueError, "result cap"):
-                github_snapshot("2026-10-13", "example/project", "example-user")
+    def test_open_inventory_is_paged_independently_and_detects_one_extra(self) -> None:
+        opened = [{"number": n, "author": {"login": "Reader"}, "reviewRequests": [{"login": "reader"}]} for n in range(120)]
+        def gh(args, **kwargs):
+            rows = opened if "open" in args else []
+            return subprocess.CompletedProcess(args, 0, json.dumps(rows), "")
+        with patch("refresh_context.command", side_effect=gh) as command:
+            result = github_snapshot(1000, "example/project", "reader", until=2000, inventory_limit=120)
+            self.assertEqual(len(result.mine), 120)
+            self.assertEqual(len(result.review_requested), 120)
+            self.assertIn("121", command.call_args_list[0].args[0])
+            with self.assertRaisesRegex(ValueError, "inventory exceeds"):
+                github_snapshot(1000, "example/project", "reader", until=2000, inventory_limit=119)
+
+    def test_history_splits_full_search_and_deduplicates(self) -> None:
+        pages = [[{"number": i} for i in range(1000)], [{"number": 1}], [{"number": 1}, {"number": 2}]]
+        with patch("refresh_context.github_rows", side_effect=pages) as rows:
+            self.assertEqual(github_history("example/repo", "reader", 20, 29, merged=True), [{"number": 1}, {"number": 2}])
+            self.assertIn("merged:1970-01-01T00:00:20Z..1970-01-01T00:00:24Z", rows.call_args_list[1].args[0])
+            self.assertIn("merged:1970-01-01T00:00:25Z..1970-01-01T00:00:29Z", rows.call_args_list[2].args[0])
+        with patch("refresh_context.github_rows", return_value=pages[0]):
+            with self.assertRaisesRegex(ValueError, "collection budget"):
+                github_history("example/repo", "reader", 20, 20, merged=False)
 
     def test_incremental_window_uses_previous_start_with_overlap_and_keeps_failed_state(self) -> None:
         started = time.time() - 7200
@@ -290,6 +312,51 @@ class RefreshTests(unittest.TestCase):
             self.assertEqual(main(), 0)
         run.assert_not_called()
 
+    def test_three_week_backlog_and_reconnection_keep_separate_source_cursors(self) -> None:
+        now = 1800000000
+        week = 7 * 86400
+        start = now - 3 * week
+        previous = RefreshState(run_id="old", status="succeeded", started=start, completed=start+10, since=start-3600, mode="incremental")
+        save_model(self.root / "local/refresh/success.json", previous)
+        config = RefreshSettings(sources={name: {"enabled": False} for name in ("granola", "linear", "slack")})
+        atomic_text(self.tools / "prompt.md", "Custom project.")
+        github = GithubSnapshot(mine=[], review_requested=[], involving_user=[], merged_in_window=[], other_open=[])
+        responses = iter(["needs-sign-in", "empty", "empty", "empty"])
+        def gather(stage, tools, prompt, *args, **kwargs):
+            run_id = prompt.split("Run ID: ")[1].splitlines()[0]
+            save_model(stage / "source-status.json", SourceManifest(run_id=run_id, sources=[
+                SourceStatus(source="github", status="empty"), SourceStatus(source="notion", status=next(responses))]))
+            return AgentResult(subtype="success", is_error=False)
+        with patch("refresh_context.time.time", return_value=now), patch("refresh_context.github_snapshot", return_value=github), \
+                patch("refresh_context.run_agent", side_effect=gather):
+            for days_github, days_notion in ((7, 0), (14, 7), (21, 14), (21, 21)):
+                refresh(self.root, self.tools, False, config=config)
+                state = RefreshState.model_validate_json((self.root / "local/refresh/published.json").read_text())
+                self.assertEqual(state.sources["github"].through, start + days_github * 86400)
+                self.assertEqual(state.sources["notion"].through, start + days_notion * 86400)
+                self.assertEqual(state.status, "succeeded" if days_notion == 21 else "partial")
+                self.assertEqual(state.sources["slack"].status, "disabled")
+
+    def test_connection_selection_excludes_disabled_and_unconfigured_tools(self) -> None:
+        config = RefreshSettings(sources={"notion": {"mcp_server": "notes"}, "slack": {"enabled": False}})
+        atomic_text(Path.home() / ".claude.json", json.dumps({"mcpServers": {"notes": {}, "slack": {}, "extra": {}}}))
+        save_model(self.tools / "settings.json", PermissionSettings(permissions=Permissions(
+            allow=["mcp__notes__get", "mcp__slack__read", "mcp__extra__read"], deny=["Bash"])))
+        result = connections(self.tools, config)
+        self.assertEqual(result.servers, {"notion": "notes"})
+        self.assertEqual(result.mcp.mcpServers, {"notes": {}})
+        self.assertEqual(result.permissions.permissions.allow, ["mcp__notes__get"])
+
+    def test_committed_receipt_finishes_crash_recovery_without_rolling_back_notes(self) -> None:
+        transaction = self.journal()
+        transaction.commits_coverage = True
+        apply_snapshot(self.root, transaction.after, set())
+        save_model(self.root / "local/refresh/pending.json", transaction)
+        save_model(self.root / "local/refresh/published.json", RefreshState(
+            run_id="test", status="partial", completed=100, since=10, mode="incremental"))
+        self.assertTrue(recover(self.root))
+        self.assertEqual(snapshot(self.root), transaction.after)
+
     def test_expired_source_surfaces_in_next_project_session(self) -> None:
         checkout = self.base / "checkout"
         checkout.mkdir()
@@ -303,18 +370,25 @@ class RefreshTests(unittest.TestCase):
         save_model(root / "local/refresh/success.json", previous)
         atomic_text(self.tools / "prompt.md", "Custom local scope.")
 
-        def expired(stage, tools, prompt, *args):
+        atomic_text(root / "source-updates/notion.md", "Verified last week: previous note.")
+        def expired(stage, tools, prompt, *args, **kwargs):
             self.assertIn("source-status.json", prompt)
             manifest = self.manifest.model_copy(deep=True)
             manifest.run_id = prompt.split("Run ID: ")[1].splitlines()[0]
             manifest.sources[2] = SourceStatus(source="notion", status="needs-sign-in", detail="private diagnostic")
+            manifest.sources[-1] = SourceStatus(source="github", status="ok")
+            atomic_text(stage / "source-updates/github.md", "New dated public release.")
+            atomic_text(stage / "source-updates/notion.md", "Discard this failed source rewrite.")
+            atomic_text(stage / "brief.md", "Discard this mixed rewrite.")
             save_model(stage / "source-status.json", manifest)
             return AgentResult(subtype="success", is_error=False)
 
         github = GithubSnapshot(mine=[], review_requested=[], involving_user=[], merged_in_window=[], other_open=[])
         with patch("refresh_context.github_snapshot", return_value=github), patch("refresh_context.run_agent", side_effect=expired):
-            with self.assertRaisesRegex(ValueError, "incomplete sources"):
-                refresh(root, self.tools, False)
+            refresh(root, self.tools, False)
+        self.assertEqual((root / "brief.md").read_text(), "# Brief\nOld brief\n")
+        self.assertIn("previous note", (root / "source-updates/notion.md").read_text())
+        self.assertIn("New dated public release", store.load(checkout).text)
         health = store.status(checkout).refresh
         self.assertEqual(health.sources["notion"].status, "needs-sign-in")
         self.assertGreater(health.sources["notion"].last_success, 0)

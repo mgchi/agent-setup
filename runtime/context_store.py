@@ -19,7 +19,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
 
-from refresh_health import RefreshHealth, RefreshState, summarize
+from refresh_health import SOURCE_NAMES, RefreshHealth, RefreshState, SourceName, summarize
 from team_runtime import ADVISER_DEFAULTS, FOLLOW_DEFAULT, Provider, redact_text, resolve_provider
 
 Scope = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$", max_length=48)]
@@ -108,6 +108,12 @@ class Project(BaseModel):
         return list(dict.fromkeys(context_source_path(path) for path in paths))
 
 
+class RefreshSource(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = True
+    mcp_server: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,80}$")
+
+
 class RefreshSettings(BaseModel):
     model_config = ConfigDict(extra="allow")
     enabled: bool = False
@@ -116,6 +122,31 @@ class RefreshSettings(BaseModel):
     github_repo: str = ""
     github_user: str = ""
     stale_after_hours: float = Field(default=26, gt=0, le=8760)
+    sources: dict[SourceName, RefreshSource] = Field(default_factory=dict)
+    model: str = Field(default="sonnet", pattern=r"^[\w./:-]{1,128}$")
+    max_window_days: int = Field(default=7, ge=1, le=90)
+    bootstrap_days: int = Field(default=14, ge=1, le=365)
+    bootstrap_budget_usd: float = Field(default=40, gt=0, le=200)
+    incremental_budget_usd: float = Field(default=10, gt=0, le=200)
+    bootstrap_timeout: int = Field(default=5400, ge=1, le=14400)
+    incremental_timeout: int = Field(default=2400, ge=1, le=14400)
+    github_inventory_limit: int = Field(default=2000, ge=1, le=10000)
+    meeting_days: int = Field(default=90, ge=1, le=730)
+    meeting_count: int = Field(default=160, ge=1, le=160)
+
+    def enabled_sources(self) -> set[SourceName]:
+        return {name for name in SOURCE_NAMES if self.sources.get(name, RefreshSource()).enabled}
+
+    def servers(self) -> dict[SourceName, str]:
+        return {name: self.sources.get(name, RefreshSource()).mcp_server or ("linear-server" if name == "linear" else name)
+                for name in sorted(self.enabled_sources() - {"github"})}
+
+    @model_validator(mode="after")
+    def distinct_servers(self) -> "RefreshSettings":
+        servers = self.servers().values()
+        if self.sources.get("github", RefreshSource()).mcp_server or len(servers) != len(set(servers)):
+            raise ValueError("Use gh for GitHub and a separate MCP server for each enabled connector.")
+        return self
 
     @field_validator("resource_root")
     @classmethod
@@ -979,7 +1010,14 @@ class Store:
             for name in ("latest.json", "success.json"):
                 path = root / name
                 states.append(RefreshState.model_validate_json(read_text(path, 16384)) if path.exists() else None)
-            return summarize(*states, time.time(), config.stale_after_hours)
+            published = root / "published.json"
+            if published.exists():
+                commit = RefreshState.model_validate_json(read_text(published, 16384))
+                if states[0] is None or commit.started >= states[0].started:
+                    states[0] = commit
+                if commit.status == "succeeded" and (states[1] is None or commit.started >= states[1].started):
+                    states[1] = commit
+            return summarize(*states, time.time(), config.stale_after_hours, enabled=config.enabled_sources())
         except (OSError, ValueError):
             return RefreshHealth(status="unreadable", warning="External refresh: health record unreadable. Check the refresh job.")
 
@@ -1010,6 +1048,8 @@ class Store:
             names = ["context.md", "playbook.md"]
             if complete_digest:
                 names.extend(["brief.md", "decisions.md", "inbox.md"])
+                if health:
+                    names.extend(f"source-updates/{name}.md" for name in sorted(self.settings.refresh.enabled_sources()))
             else:
                 warning += " Project digest publication was interrupted. Verify live sources until refresh recovery completes."
             for name in names:

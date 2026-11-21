@@ -46,7 +46,8 @@ class RefreshHealth(BaseModel):
     warning: str = ""
 
 
-def summarize(latest: RefreshState | None, success: RefreshState | None, now: float, stale_hours: float) -> RefreshHealth:
+def summarize(latest: RefreshState | None, success: RefreshState | None, now: float, stale_hours: float,
+              *, enabled: set[SourceName] | None = None) -> RefreshHealth:
     last = success.completed if success else 0
     attempt = latest or success
     health = RefreshHealth(status=attempt.status if attempt else "never-run", last_success=last,
@@ -59,14 +60,25 @@ def summarize(latest: RefreshState | None, success: RefreshState | None, now: fl
         source = (attempt.sources if attempt else {}).get(name, SourceHealth())
         if success and not source.last_success and name not in (attempt.sources if attempt else {}):
             source = success.sources.get(name, SourceHealth(last_success=last))
+        if enabled is not None and name not in enabled:
+            source = source.model_copy(update={"status": "disabled"})
         health.sources[name] = source
         if source.status in ACTIONS:
             date = dt.datetime.fromtimestamp(source.last_success, dt.timezone.utc).date() if source.last_success else "unknown"
             notices.append(f"{name} {source.status}, last verified {date}, {ACTIONS[source.status]}")
+        elif attempt and source.status in {"ok", "empty"} and source.through and source.through < attempt.started - 1:
+            date = dt.datetime.fromtimestamp(source.through, dt.timezone.utc).date()
+            notices.append(f"{name} catching up, covered through {date}")
+    if enabled == set():
+        health.warning = ""
+        return health
     if health.status == "never-run":
         notices.append("no recorded attempt; check the refresh schedule")
     elif health.status == "failed" and not notices:
         notices.append(f"last attempt failed ({health.reason}); check the refresh job")
+    elif health.status == "partial":
+        date = dt.datetime.fromtimestamp(last, dt.timezone.utc).date() if last else "unknown"
+        notices.append(f"read the dated source updates; last full digest {date}")
     if last and now - last > stale_hours * 3600:
         notices.append(f"last full success {health.age_hours:g} hours ago")
     if notices:
