@@ -20,7 +20,7 @@ from urllib.parse import unquote, urlsplit
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from context_store import RefreshPermissions as Permissions, RefreshSettings, atomic_text, clean, digest, linked_path, load_settings, lock, read_text, save_model
-from refresh_health import SOURCE_NAMES, Outcome, Reason, RefreshState, SourceHealth, SourceName
+from refresh_health import SOURCE_NAMES, STAGE_MESSAGES, Outcome, Reason, RefreshState, SourceHealth, SourceName, StageIssue
 
 ROOT_FILES = ("brief.md", "people.md", "decisions.md", "inbox.md", "sources.md")
 FOLDERS = ("projects", "customers", "meetings", "source-updates")
@@ -29,6 +29,7 @@ MEETING_DAYS = 90
 MEETING_COUNT = 160
 NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*\.md$")
 INBOX_MARKER = re.compile(r"(?m)^<!-- agent-context-refresh:[a-f0-9]{64} -->\n?")
+SOURCE_STAMP = re.compile(r"^> Source coverage through [0-9TZ:-]+ \(checked [0-9TZ:-]+\)\.\n\n")
 
 
 class Document(BaseModel):
@@ -70,6 +71,12 @@ class SourceFailure(ValueError):
     def __init__(self, outcomes: dict[SourceName, Outcome], message: str):
         super().__init__(message)
         self.outcomes = outcomes
+
+
+class StageFailure(ValueError):
+    def __init__(self, issue: StageIssue):
+        super().__init__(STAGE_MESSAGES[issue])
+        self.issue = issue
 
 
 class PermissionSettings(BaseModel):
@@ -144,31 +151,65 @@ def stage_manifest(stage: Path, run_id: str, expected: set[str]) -> SourceManife
     for path in stage.rglob("*"):
         relative = str(path.relative_to(stage))
         if linked_path(path):
-            raise ValueError("Staged context cannot contain symlinks.")
+            raise StageFailure("unexpected-path")
         if path.is_dir() and relative in (*FOLDERS, ".cache"):
             continue
-        if path.is_file() and (allowed_document(relative) or relative in {".cache/github.json", "source-status.json"}):
+        if path.is_file() and (allowed_document(relative) or relative in {".cache/github.json", ".cache/discovered.md", "source-status.json"}):
             continue
-        raise ValueError(f"Unexpected staged path: {relative}")
+        raise StageFailure("unexpected-path")
     status_path = stage / "source-status.json"
+    if not status_path.is_file():
+        raise StageFailure("manifest-missing")
     if status_path.stat().st_size > 8000:
-        raise ValueError("Source manifest is too large.")
-    manifest = SourceManifest.model_validate_json(status_path.read_text())
+        raise StageFailure("size-limit")
+    try:
+        manifest = SourceManifest.model_validate_json(status_path.read_text())
+    except ValueError:
+        raise StageFailure("manifest-format") from None
     if manifest.run_id != run_id or len(manifest.sources) != len(expected) or {item.source for item in manifest.sources} != expected:
-        raise ValueError("Source manifest must cover this run and exactly the requested sources.")
+        raise StageFailure("manifest-coverage")
     return manifest
+
+
+def staged_digest(stage: Path, before: Snapshot) -> Snapshot:
+    value = snapshot(stage)
+    proposal = stage / ".cache/discovered.md"
+    if not proposal.exists():
+        return value
+    if proposal.stat().st_size > 24000:
+        raise StageFailure("size-limit")
+    content = proposal.read_text(encoding="utf-8")
+    if clean(content, 24001) != content:
+        raise StageFailure("unsafe-content")
+    original = next((item.text for item in before.documents if item.path == "sources.md"), "")
+    sources = next((item for item in value.documents if item.path == "sources.md"), None)
+    if sources is None:
+        raise StageFailure("core-file-missing")
+    if sources.text != original:
+        raise StageFailure("pinned-sources")
+    prefix, marker, discovered = original.partition("## Discovered")
+    if content != discovered:
+        if not marker and prefix and not prefix.endswith("\n"):
+            prefix += "\n"
+        sources.text = prefix + "## Discovered\n" + content.lstrip("\n")
+    return value
 
 
 def validate_documents(value: Snapshot, before: Snapshot, context_root: Path | None, config: RefreshSettings) -> Snapshot:
     old = {item.path: item.text for item in before.documents}
     contents = {item.path: item.text for item in value.documents}
     if set(ROOT_FILES) - contents.keys():
-        raise ValueError("Staged context is missing a core digest file.")
-    if "sources.md" in old and old["sources.md"].split("## Discovered", 1)[0] != contents["sources.md"].split("## Discovered", 1)[0]:
-        raise ValueError("Pinned source definitions changed.")
+        raise StageFailure("core-file-missing")
+    if "sources.md" in old:
+        prefix, marker, _ = old["sources.md"].partition("## Discovered")
+        current, new_marker, _ = contents["sources.md"].partition("## Discovered")
+        if not marker and new_marker and prefix and not prefix.endswith("\n"):
+            prefix += "\n"
+        if prefix != current:
+            raise StageFailure("pinned-sources")
     for item in value.documents:
         if clean(item.text, 100_001) != item.text:
-            raise ValueError(f"Credential pattern in staged file: {item.path}")
+            raise StageFailure("unsafe-content")
         if item.path == "brief.md":
             limit = 80
         elif item.path == "sources.md":
@@ -178,9 +219,9 @@ def validate_documents(value: Snapshot, before: Snapshot, context_root: Path | N
         else:
             limit = 150
         if len(item.text.splitlines()) > limit or len(item.text.encode()) > 24_000:
-            raise ValueError(f"Context size limit exceeded: {item.path}")
+            raise StageFailure("size-limit")
         if re.search(r"(?:^|\s)@[/~.]", item.text) or "\x00" in item.text:
-            raise ValueError(f"Invalid context content: {item.path}")
+            raise StageFailure("unsafe-content")
     if len([name for name in contents if name.startswith("projects/")]) > 40:
         raise ValueError("Project context needs consolidation to 40 files.")
     if len([name for name in contents if name.startswith("customers/")]) > 60:
@@ -197,7 +238,7 @@ def validate_stage(stage: Path, before: Snapshot, run_id: str, context_root: Pat
     good = {name for name, status in statuses.items() if status in {"ok", "empty"}}
     if not good:
         raise ValueError("No enabled source completed collection.")
-    staged = snapshot(stage)
+    staged = staged_digest(stage, before)
     validate_documents(staged, before, context_root, config)
     return assemble_digest(initial_digest(before), staged, statuses, good == expected, context_root, config)
 
@@ -261,7 +302,7 @@ def retain_meetings(value: Snapshot, today: dt.date | None = None, *, context_ro
     for name in keep & references.keys():
         missing = references[name] - references.keys()
         if missing:
-            raise ValueError(f"Broken digest reference in {name}: {sorted(missing)[0]}")
+            raise StageFailure("broken-reference")
     return Snapshot(documents=[item for item in value.documents if item.path in keep])
 
 
@@ -416,6 +457,7 @@ def settings_for_stage(source: PermissionSettings, stage: Path) -> PermissionSet
     permissions = source.permissions.model_copy(deep=True)
     permissions.allow = [rule for rule in permissions.allow if rule.startswith("mcp__")]
     permissions.allow.extend([f"Read(/{stage}/**)", f"Write(/{stage}/**)", f"Edit(/{stage}/**)", "Agent", "TodoWrite"])
+    permissions.deny.extend([f"Write(/{stage}/sources.md)", f"Edit(/{stage}/sources.md)"])
     return PermissionSettings(permissions=permissions)
 
 
@@ -534,6 +576,8 @@ def source_windows(config: RefreshSettings, now: float, previous: RefreshState |
 def refresh_prompt(stage: Path, tools: Path, run_id: str, mode: str, now: float, available: set[str], windows: dict) -> str:
     schedule = "\n".join(f"{name}: {utc_stamp(windows[name][0])} through {utc_stamp(windows[name][1])}"
                          for name in sorted(available))
+    source_only = available != set(windows) or any(windows[name][1] < now for name in available)
+    example = {"run_id": run_id, "sources": [{"source": name, "status": "empty"} for name in sorted(available)]}
     return (f"Now: {utc_stamp(now)}\nMode: {mode}\nRun ID: {run_id}\nStaging directory: {stage}\n"
             + (tools / "prompt.md").read_text()
             + "\nRequired runner contract takes precedence over older template output instructions. "
@@ -544,18 +588,25 @@ def refresh_prompt(stage: Path, tools: Path, run_id: str, mode: str, now: float,
             "Empty means a successful complete search with no changes. Mark incomplete searches truncated. "
             "For every ok source write source-updates/<source>.md, a concise rolling note with dated, linked "
             "facts and earlier still-relevant evidence from its staged note. Merge overlap by source link. "
-            "Keep these notes self-contained and use external source links. Preserve previous verification dates. "
-            "Update the combined Markdown digest only from verified information. Keep pinned sources intact.")
+            "Keep these notes self-contained and use external source links. Preserve previous fact dates. "
+            "The runner adds the source coverage timestamp. "
+            "Keep sources.md read-only. For a full digest, place discovered-source section updates in .cache/discovered.md. "
+            "The runner combines that section with the protected original source definitions. "
+            + ("This is a source-only pass. Write only source-status.json and the verified source notes." if source_only else
+               "Update the combined digest from verified information in brief.md, people.md, decisions.md, inbox.md, "
+               "or individual Markdown files under projects, customers, and meetings.")
+            + "\nManifest structure (replace the example statuses with observed outcomes): " + json.dumps(example))
 
 
 def initial_digest(before: Snapshot) -> Snapshot:
     existing = {item.path for item in before.documents}
-    missing = [Document(path=name, text=f"# {Path(name).stem.title()}\n") for name in ROOT_FILES if name not in existing]
+    missing = [Document(path=name, text="# Sources\n\n## Discovered\n" if name == "sources.md" else f"# {Path(name).stem.title()}\n")
+               for name in ROOT_FILES if name not in existing]
     return Snapshot(documents=[*before.documents, *missing])
 
 
 def assemble_digest(before: Snapshot, staged: Snapshot, statuses: dict, full: bool,
-                    root: Path | None, config: RefreshSettings) -> Snapshot:
+                    root: Path | None, config: RefreshSettings, *, windows: dict | None = None, checked_at: float = 0) -> Snapshot:
     # With incomplete coverage there is no reliable attribution for text in an
     # older blended brief. Preserve it verbatim and publish only verified source notes.
     baseline = staged if full else before
@@ -568,8 +619,11 @@ def assemble_digest(before: Snapshot, staged: Snapshot, statuses: dict, full: bo
         if status == "ok":
             path = f"source-updates/{name}.md"
             if path not in notes or not notes[path].text.strip():
-                raise ValueError("A successful source requires a dated evidence note.")
+                raise StageFailure("source-note-missing")
             docs[path] = notes[path]
+            if windows is not None:
+                stamp = f"> Source coverage through {utc_stamp(windows[name][1])} (checked {utc_stamp(checked_at)}).\n\n"
+                docs[path] = Document(path=path, text=stamp + SOURCE_STAMP.sub("", notes[path].text, count=1))
     result = Snapshot(documents=list(docs.values()))
     checked = validate_documents(result, before, root, config)
     # Retention is applied to a complete synthesis; a partial pass must not
@@ -619,6 +673,8 @@ def refresh(root: Path, tools_root: Path, bootstrap: bool, *, config: RefreshSet
                 stage = Path(temporary)
                 base = initial_digest(before)
                 apply_snapshot(stage, base, set())
+                original_sources = next(item.text for item in base.documents if item.path == "sources.md")
+                atomic_text(stage / ".cache/discovered.md", original_sources.partition("## Discovered")[2])
                 (stage / "source-updates").mkdir(exist_ok=True, mode=0o700)
                 if "github" in enabled:
                     reason = "source"
@@ -640,7 +696,7 @@ def refresh(root: Path, tools_root: Path, bootstrap: bool, *, config: RefreshSet
                                    logs / f"{run_id}.err", active=active, model=config.model)
                 reason = "validation"
                 manifest = stage_manifest(stage, run_id, available)
-                staged = snapshot(stage)
+                staged = staged_digest(stage, base)
                 validate_documents(staged, base, root, config)
                 outcomes = {item.source: {"error": "failed", "partial": "truncated"}.get(item.status, item.status)
                             for item in manifest.sources}
@@ -651,7 +707,7 @@ def refresh(root: Path, tools_root: Path, bootstrap: bool, *, config: RefreshSet
                 if not good:
                     raise SourceFailure({}, "No enabled source completed collection.")
                 full = good == enabled and all(windows[name][1] >= started for name in good)
-                after = assemble_digest(base, staged, outcomes, full, root, config)
+                after = assemble_digest(base, staged, outcomes, full, root, config, windows=windows, checked_at=started)
                 committed = {name: source.model_copy() for name, source in sources.items()}
                 for name in good:
                     committed[name] = SourceHealth(status=outcomes[name], last_success=started,
@@ -670,11 +726,16 @@ def refresh(root: Path, tools_root: Path, bootstrap: bool, *, config: RefreshSet
             elif isinstance(error, subprocess.TimeoutExpired):
                 reason = "timeout"
             state = RefreshState(run_id=run_id, status="failed", started=started, completed=time.time(), since=since,
-                                 mode=mode, reason=reason, sources=sources)
+                                 mode=mode, reason=reason, issue=error.issue if isinstance(error, StageFailure) else None, sources=sources)
             save_model(latest, state)
             details = ", ".join(f"{name} {item.status}" for name, item in sources.items()
                                 if item.status not in {"unknown", "disabled"})
-            print(f"Context refresh failed ({details or reason}). Check agent-context status for the refresh project.")
+            messages = [f"Context refresh failed during {reason}."]
+            if details:
+                messages.append(f"Source status: {details}.")
+            if state.issue:
+                messages.append(STAGE_MESSAGES[state.issue])
+            print(" ".join([*messages, "Check agent-context status for the refresh project."]))
             raise
 
 

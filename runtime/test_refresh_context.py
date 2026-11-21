@@ -17,7 +17,7 @@ from refresh_context import (
     AgentResult, Document, GithubSnapshot, Permissions, PermissionSettings,
     RefreshState, Snapshot, SourceManifest, SourceStatus, Transaction,
     allowed_document, apply_snapshot, connections, github_history, github_snapshot, local_references,
-    main, merge_inbox, publish, recover, refresh, retain_meetings, run_agent,
+    main, merge_inbox, publish, recover, refresh, retain_meetings, run_agent, staged_digest,
     settings_for_stage, snapshot, validate_stage,
 )
 
@@ -256,7 +256,43 @@ class RefreshTests(unittest.TestCase):
         self.assertIn(f"Write(/{self.stage}/**)", permissions.allow)
         self.assertIn(f"Edit(/{self.stage}/**)", permissions.allow)
         self.assertNotIn("Bash", permissions.allow)
-        self.assertEqual(permissions.deny, ["Bash"])
+        self.assertEqual(permissions.deny, ["Bash", f"Write(/{self.stage}/sources.md)", f"Edit(/{self.stage}/sources.md)"])
+
+    def test_discovery_updates_preserve_pinned_bytes_and_support_legacy_sources(self) -> None:
+        original = next(item for item in self.before.documents if item.path == "sources.md")
+        for old in ("# Pinned sources\nChecked link\n## Discovered\nOld link", "# Sources without a final newline"):
+            original.text = old
+            apply_snapshot(self.stage, self.before, set())
+            atomic_text(self.stage / ".cache/discovered.md", "A dated, verified public link.\n")
+            after = validate_stage(self.stage, self.before, "test")
+            result = next(item.text for item in after.documents if item.path == "sources.md")
+            self.assertTrue(result.startswith(old.partition("## Discovered")[0]))
+            self.assertIn("## Discovered\nA dated", result)
+            atomic_text(self.stage / "sources.md", "Edited the protected section.")
+            with self.assertRaisesRegex(ValueError, "Pinned source"):
+                staged_digest(self.stage, self.before)
+
+    def test_validation_failure_reaches_briefing_alongside_missing_connector(self) -> None:
+        checkout = self.base / "checkout"
+        checkout.mkdir()
+        store = Store(Settings(context_root=self.base / "store", projects=[Project(slug="sample", roots=[checkout])],
+                               refresh=RefreshSettings(enabled=True, project="sample")))
+        root = store.settings.project_root("sample")
+        atomic_text(self.tools / "prompt.md", "Keep a concise digest.")
+        config = RefreshSettings(sources={"notion": {"mcp_server": "missing"}})
+        def invalid(stage, tools, prompt, *args, **kwargs):
+            self.assertIn("source-only pass", prompt)
+            atomic_text(stage / "source-status.json", '{"private_field":"synthetic diagnostic"}')
+            return AgentResult(subtype="success", is_error=False)
+        github = GithubSnapshot(mine=[], review_requested=[], involving_user=[], merged_in_window=[], other_open=[])
+        with patch("refresh_context.github_snapshot", return_value=github), patch("refresh_context.run_agent", side_effect=invalid):
+            with self.assertRaisesRegex(ValueError, "manifest is malformed"):
+                refresh(root, self.tools, False, config=config)
+        health = store.status(checkout).refresh
+        self.assertEqual(health.issue, "manifest-format")
+        self.assertIn("notion unavailable", health.warning)
+        self.assertIn("manifest is malformed", health.warning)
+        self.assertNotIn("private_field", health.model_dump_json())
 
     def test_agent_failure_payloads_never_count_as_success(self) -> None:
         fake_home = self.base / "home"
@@ -391,6 +427,7 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual((root / "brief.md").read_text(), "# Brief\nOld brief\n")
         self.assertIn("previous note", (root / "source-updates/notion.md").read_text())
         self.assertIn("New dated public release", store.load(checkout).text)
+        self.assertIn("> Source coverage through", (root / "source-updates/github.md").read_text())
         health = store.status(checkout).refresh
         self.assertEqual(health.sources["notion"].status, "needs-sign-in")
         self.assertGreater(health.sources["notion"].last_success, 0)

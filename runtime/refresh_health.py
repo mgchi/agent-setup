@@ -9,6 +9,20 @@ SourceName = Literal["github", "granola", "linear", "notion", "slack"]
 SOURCE_NAMES = frozenset(get_args(SourceName))
 Outcome = Literal["ok", "empty", "unavailable", "needs-sign-in", "truncated", "failed", "unknown", "disabled"]
 Reason = Literal["source", "agent", "validation", "publication", "setup", "timeout", "unknown"]
+StageIssue = Literal["manifest-missing", "manifest-format", "manifest-coverage", "unexpected-path", "pinned-sources",
+                     "core-file-missing", "source-note-missing", "size-limit", "unsafe-content", "broken-reference"]
+STAGE_MESSAGES = {
+    "manifest-missing": "Staged output is missing source-status.json.",
+    "manifest-format": "Source manifest is malformed. Check the required JSON fields.",
+    "manifest-coverage": "Source manifest must cover this run and exactly the requested sources.",
+    "unexpected-path": "Staged output contains an unexpected path or symlinks. Check the permitted output paths.",
+    "pinned-sources": "Pinned source definitions changed. Preserve the text before the Discovered section.",
+    "core-file-missing": "Staged context is missing a core digest file.",
+    "source-note-missing": "A successful source is missing its required evidence note.",
+    "size-limit": "Staged output exceeds a size limit. Consolidate the digest.",
+    "unsafe-content": "Staged output failed the content checks. Review the staged output contract.",
+    "broken-reference": "Broken digest reference. Check links in generated notes.",
+}
 ACTIONS = {
     "needs-sign-in": "sign in to the connector and retry",
     "unavailable": "check the connector configuration and retry",
@@ -33,6 +47,7 @@ class RefreshState(BaseModel):
     mode: str
     detail: str = ""  # Older receipts may contain detail. Never copy this to a session.
     reason: Reason = "unknown"
+    issue: StageIssue | None = None
     sources: dict[SourceName, SourceHealth] = Field(default_factory=dict)
 
 
@@ -42,6 +57,7 @@ class RefreshHealth(BaseModel):
     last_success: float = 0
     age_hours: float | None = None
     reason: Reason = "unknown"
+    issue: StageIssue | None = None
     sources: dict[SourceName, SourceHealth] = Field(default_factory=dict)
     warning: str = ""
 
@@ -51,10 +67,11 @@ def summarize(latest: RefreshState | None, success: RefreshState | None, now: fl
     last = success.completed if success else 0
     attempt = latest or success
     health = RefreshHealth(status=attempt.status if attempt else "never-run", last_success=last,
-                           last_attempt=attempt.started or attempt.completed if attempt else 0,
+                           last_attempt=(attempt.started or attempt.completed) if attempt else 0,
                            age_hours=round(max(0, now - last) / 3600, 2) if last else None)
     if attempt:
         health.reason = attempt.reason
+        health.issue = attempt.issue
     notices = []
     for name in sorted(SOURCE_NAMES):
         source = (attempt.sources if attempt else {}).get(name, SourceHealth())
@@ -74,8 +91,9 @@ def summarize(latest: RefreshState | None, success: RefreshState | None, now: fl
         return health
     if health.status == "never-run":
         notices.append("no recorded attempt; check the refresh schedule")
-    elif health.status == "failed" and not notices:
-        notices.append(f"last attempt failed ({health.reason}); check the refresh job")
+    elif health.status == "failed" and (health.reason != "source" or not notices):
+        notices.append(STAGE_MESSAGES[health.issue].rstrip(".") if health.issue
+                       else f"last attempt failed ({health.reason}); check the refresh job")
     elif health.status == "partial":
         date = dt.datetime.fromtimestamp(last, dt.timezone.utc).date() if last else "unknown"
         notices.append(f"read the dated source updates; last full digest {date}")

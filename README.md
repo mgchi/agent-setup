@@ -418,6 +418,13 @@ are preserved. The session reads the dated updates alongside them. When all
 enabled sources catch up, the combined digest can be refreshed. Publication
 commits the notes and their coverage together.
 
+The runner dates verified source notes and protects the pinned section of
+`sources.md` from model edits. During collection the model can propose changes
+to the discovered section in `.cache/discovered.md`. The runner combines
+validated proposals with the original pinned text. Status reports safe
+validation reasons alongside connector failures, including missing or malformed
+manifests, unexpected paths, and edits to protected sources.
+
 The refresh model defaults to `sonnet`. Bootstrap and incremental runs have
 separate USD budgets and timeouts in seconds. Bootstrap starts with 14 days
 of history. Source selection, model, budgets, timeouts, inventory size, catch-up
