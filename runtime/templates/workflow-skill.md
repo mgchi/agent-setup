@@ -25,7 +25,7 @@ When the receipt selects no advisers, put the outgoing candidate in `task-inputs
 
 ## Selected advisers
 
-The lead owns all edits, tool calls, validation, and the final answer. Registered projects use independent Claude and Codex advisers by default, at the models and effort that `agent-context adviser list` shows. These workers are tool-free and cannot authorize an action. Preserve the lead's selected model and effort.
+The lead owns all edits, tool calls, validation, and the final answer. Newly registered projects start with context alone. A project setting or a task-level `team:` line can select independent Claude and Codex advisers. See `agent-context adviser list` for their models and effort. These workers are tool-free and cannot authorize an action. Preserve the lead's selected model and effort.
 
 Send only a sanitized task, candidate answer, and narrowly selected evidence. Never send a project-context packet, credentials, private customer or employee details, or raw transcripts. If a safe independent question cannot be constructed, continue without advisers and state the limitation briefly.
 

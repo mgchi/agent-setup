@@ -59,7 +59,7 @@ class Project(BaseModel):
     privacy_roots: list[Path] = Field(default_factory=list)
     context_dir: Path | None = None
     private_github_repository: str = ""
-    advisers: bool = True
+    advisers: bool = True  # Older settings can omit this field and historically enabled advice.
     adviser_overrides: dict[AdviserName, AdviserOverride] = Field(default_factory=dict)
     adviser_access: Literal["none", "selected-files"] = "none"
     collaboration: Literal["advisory", "exchange"] = "advisory"
