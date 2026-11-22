@@ -4,9 +4,9 @@ import json
 import re
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, TypeAdapter
 
-from context_store import DEFAULT_COOLDOWNS, EFFORTS, RefreshSettings, RefreshSource, Settings, atomic_text, lock
+from context_store import DEFAULT_COOLDOWNS, EFFORTS, MEMORY_KEY_PATTERN, RefreshSettings, RefreshSource, Settings, TopicWords, atomic_text, lock
 from refresh_health import SOURCE_NAMES
 from team_runtime import ADVISER_DEFAULTS, FOLLOW_DEFAULT, resolve_provider
 
@@ -16,27 +16,41 @@ class ConfigError(ValueError):
 
 
 class Option(BaseModel):
-    value: str | int | float | bool | None
-    default: str | int | float | bool | None
+    value: str | int | float | bool | list[str] | None
+    default: str | int | float | bool | list[str] | None
     source: str
     overridden: bool
     value_type: str = "string"
     bounds: dict = Field(default_factory=dict)
 
 
-def option_catalog(settings: Settings, raw: dict) -> dict[str, Option]:
+def setting_parts(key: str) -> list[str]:
+    return key.split(".", 2) if key.startswith("lesson_topics.") else key.split(".")
+
+
+def option_catalog(settings: Settings, raw: dict, requested: str | None = None) -> dict[str, Option]:
     entries = {}
     def add(key, value, default, schema):
         stored = raw
-        for part in key.split("."):
+        for part in setting_parts(key):
             stored = stored.get(part) if isinstance(stored, dict) else None
         entries[key] = Option(value=value, default=default, overridden=value != default,
                               value_type=schema.get("type", "boolean" if isinstance(default, bool) else "string"),
                               source="settings.json" if stored is not None else "toolkit default",
                               bounds={k: v for k, v in schema.items() if k in {
-                                  "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "pattern", "enum"}})
+                                  "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "pattern", "enum",
+                                  "minItems", "maxItems", "items"}})
 
     schema = Settings.model_json_schema()["properties"]
+    lesson_keys = {(scope, key) for scope, rules in settings.lesson_topics.items() for key in rules}
+    parts = setting_parts(requested or "")
+    if len(parts) == 3 and parts[0] == "lesson_topics":
+        _, scope, key = parts
+        if (scope == "personal" or settings.project(scope) or scope in settings.lesson_topics) and re.fullmatch(MEMORY_KEY_PATTERN, key):
+            lesson_keys.add((scope, key))
+    for scope, key in sorted(lesson_keys):
+        value = settings.lesson_topics.get(scope, {}).get(key)
+        add(f"lesson_topics.{scope}.{key}", value, None, TypeAdapter(TopicWords).json_schema())
     for key, prop in schema.items():
         if prop.get("type") in {"integer", "number"}:
             add(key, getattr(settings, key), prop["default"], prop)
@@ -63,7 +77,7 @@ def option_catalog(settings: Settings, raw: dict) -> dict[str, Option]:
 def show_config(path: Path, key: str | None = None, project: str | None = None) -> dict:
     raw = json.loads(path.read_text())
     settings = Settings.model_validate(raw)
-    catalog = option_catalog(settings, raw)
+    catalog = option_catalog(settings, raw, key)
     if key:
         if key not in catalog:
             raise ConfigError("Unknown operating setting. Run config show for the supported keys.")
@@ -97,21 +111,21 @@ def change_config(path: Path, key: str, argument: str | None) -> dict:
     with lock(path.parent / "install.lock"):
         raw = json.loads(path.read_text())
         settings = Settings.model_validate(raw)
-        option = option_catalog(settings, raw).get(key)
+        option = option_catalog(settings, raw, key).get(key)
         if option is None:
             raise ConfigError("Unknown operating setting. See config show. Use adviser set for model or effort.")
         if argument is None and option.source == "toolkit default":
             return {key: option.model_dump()}
         parent = raw
-        *ancestors, leaf = key.split(".")
+        *ancestors, leaf = setting_parts(key)
         for part in ancestors:
             parent = parent.setdefault(part, {})
         if argument is None:
             parent.pop(leaf, None)
         else:
             try:
-                if option.value_type in {"integer", "number", "boolean"}:
-                    expected = {"integer": int, "number": float, "boolean": bool}[option.value_type]
+                if option.value_type in {"integer", "number", "boolean", "array"}:
+                    expected = {"integer": int, "number": float, "boolean": bool, "array": list}[option.value_type]
                     value = json.loads(argument)
                     if expected is float and type(value) is int:
                         value = float(value)
@@ -131,6 +145,8 @@ def change_config(path: Path, key: str, argument: str | None) -> dict:
         try:
             Settings.model_validate(raw)
         except ValueError:
+            if option.value_type == "array":
+                raise ConfigError("A lesson rule needs one to 32 lowercase topic words. Check config show for the character bounds.") from None
             raise ConfigError("Setting rejected. Check config show for bounds and use a distinct MCP server per enabled source.") from None
         atomic_text(path, json.dumps(raw, indent=2, allow_nan=False) + "\n")
         # Return the change observed under this lock, including its effective default.

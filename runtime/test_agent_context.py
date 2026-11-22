@@ -15,9 +15,9 @@ from unittest.mock import patch
 
 from context_store import Capture, Cooldown, LocalAdapter, Memory, Project, Settings, Store, atomic_text, digest, load_settings, lock, save_model
 from agent_context import (
-    CONTINUATION, Advice, CheckpointInput, HookInput, MemoryDraft, PhaseResult,
+    CONTINUATION, Advice, CheckpointInput, HookInput, LocalCompletion, MemoryDraft, PhaseResult,
     add_project, begin, call_provider, check_advisers, checkpoint, collect, hook, list_advisers, main, parser, read_run, release,
-    adviser_stats, client_version, cooldown_seconds, provider_slot, review, run_adapter, run_path, select_providers, set_adviser, worker,
+    adviser_stats, client_version, cooldown_seconds, finish, local_checkpoint, provider_slot, review, run_adapter, run_path, select_providers, set_adviser, worker,
 )
 from disclosure import DisclosureError
 from team_runtime import ADVISER_DEFAULTS, Outcome, Provider
@@ -273,6 +273,81 @@ class WorkflowTests(unittest.TestCase):
         checkpoint(self.store, run_id, CheckpointInput())
         self.assertEqual(hook(self.store, self.settings_path, self.event("Stop", last_assistant_message="Answer"), "codex"), "")
 
+    def test_no_adviser_completion_through_cli_and_hooks(self) -> None:
+        decision = "We decided to retain the draft."
+        self.store.settings.projects[0].advisers = False
+        save_model(self.settings_path, self.store.settings)
+        receipt = begin(self.store, self.settings_path, self.cwd, decision, client="codex", session="session")
+        self.assertIn("--local-file", receipt.instruction)
+        self.assertNotIn("collect", receipt.instruction)
+        reminder = json.loads(hook(self.store, self.settings_path, self.event("Stop"), "codex"))
+        self.assertIn("--local-file", reminder["reason"])
+        self.assertNotIn("collect", reminder["reason"])
+        directory = Path(receipt.directory)
+        bundle = directory / "task-inputs/local.json"
+        atomic_text(bundle, json.dumps({"answer": "The draft is retained.", "evidence": "Fixture check passed.",
+                    "checkpoint": {"memories": [{"key": "draft", "kind": "decision", "scope": "example",
+                                                "text": decision, "evidence": decision}]}}))
+        args = ["agent-context", "--settings", str(self.settings_path), "checkpoint", "--run", receipt.run_id, "--local-file", str(bundle)]
+        other = self.root / "local.json"
+        other.write_bytes(bundle.read_bytes())
+        with patch.object(sys, "argv", [*args[:-1], str(other)]), contextlib.redirect_stderr(io.StringIO()):
+            self.assertNotEqual(main(), 0)
+        self.assertFalse((directory / "checkpoint.json").exists())
+        for _ in range(2):
+            with patch.object(sys, "argv", args), contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(main(), 0)
+                self.assertEqual(json.loads(output.getvalue())["memory_keys"], ["draft"])
+        self.assertTrue(finish(self.store, receipt.run_id)["done"])
+        self.assertIn(decision, self.store.load(self.cwd, "draft").text)
+        self.assertFalse(any(directory.glob("input-*.json")))
+        self.assertFalse(any(directory.glob("review-*.json")))
+        self.assertFalse((directory / "latest-review").exists())
+        self.spawner.assert_not_called()
+        self.assertEqual(hook(self.store, self.settings_path, self.event("Stop"), "codex"), "")
+
+    def test_local_completion_screens_full_inputs_before_any_write(self) -> None:
+        token = "sk-" + "b" * 30
+        on = self.start()
+        with self.assertRaisesRegex(ValueError, "no selected advisers"):
+            local_checkpoint(self.store, on, LocalCompletion(answer="Public result"))
+        run_id = self.start("team: off\n" + token)
+        with self.assertRaisesRegex(DisclosureError, "sanitized-request-required"):
+            local_checkpoint(self.store, run_id, LocalCompletion(answer="Public result"))
+        for field in ("request", "answer", "evidence"):
+            bundle = {"request": "Public question", "answer": "Public result", field: "safe " * 5000 + token}
+            with self.subTest(field=field), self.assertRaisesRegex(DisclosureError, "provider-token"):
+                local_checkpoint(self.store, run_id, LocalCompletion(**bundle))
+        phrase = " ".join(f"fixtureword{index}" for index in range(32))
+        atomic_text(self.store.local / "personal.md", phrase)
+        with self.assertRaisesRegex(DisclosureError, "private-context"):
+            local_checkpoint(self.store, run_id, LocalCompletion(answer=phrase, request="Public question"))
+        self.assertFalse((run_path(self.store, run_id) / "checkpoint.json").exists())
+        local_checkpoint(self.store, run_id, LocalCompletion(answer="Public result", request="Public question"))
+        self.assertTrue(finish(self.store, run_id)["done"])
+
+    def test_local_completion_detects_checkout_and_source_changes(self) -> None:
+        subprocess.run(["git", "init", "-q"], cwd=self.cwd, check=True)
+        subprocess.run(["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                        "-c", "commit.gpgSign=false", "commit", "--allow-empty", "-qm", "Fixture"], cwd=self.cwd, check=True)
+        source = self.root / "guide.md"
+        source.write_text("Original source material.")
+        self.store.settings.projects[0].context_sources = [source]
+        run_id = self.start("team: off")
+        bundle = LocalCompletion(answer="All local checks passed.")
+        local_checkpoint(self.store, run_id, bundle)
+        changed = self.cwd / "work.txt"
+        changed.write_text("A new result")
+        with self.assertRaisesRegex(ValueError, "changed"):
+            finish(self.store, run_id)
+        changed.unlink()
+        self.assertTrue(finish(self.store, run_id)["done"])
+        source.write_text("New source material.")
+        with self.assertRaisesRegex(ValueError, "sources changed"):
+            local_checkpoint(self.store, run_id, bundle)
+        with self.assertRaisesRegex(ValueError, "changed"):
+            finish(self.store, run_id)
+
     def test_topic_changes_and_new_records_invalidate_checkpoint(self) -> None:
         topics = self.root / "topics"
         topics.mkdir()
@@ -317,7 +392,16 @@ class WorkflowTests(unittest.TestCase):
         run_id = self.start("Explain this short paragraph.")
         response = hook(self.store, self.settings_path, self.event("Stop"), "codex")
         self.assertEqual(response, "")
-        self.assertTrue((run_path(self.store, run_id) / "checkpoint.json").exists())
+        saved = json.loads((run_path(self.store, run_id) / "checkpoint.json").read_text())
+        self.assertIn("no final answer text", saved["note"])
+
+    def test_automatic_personal_completion_screens_the_unshortened_answer(self) -> None:
+        self.cwd = self.root
+        run_id = self.start("Summarize the sample.")
+        final = "Public text. " * 2000 + "sk-" + "b" * 30
+        reminder = json.loads(hook(self.store, self.settings_path, self.event("Stop", last_assistant_message=final), "codex"))
+        self.assertIn("--local-file", reminder["reason"])
+        self.assertFalse((run_path(self.store, run_id) / "checkpoint.json").exists())
 
     def test_invalid_checkpoint_saves_no_partial_memories(self) -> None:
         run_id = self.start("I prefer concise output.\nRun the migration.")

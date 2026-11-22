@@ -30,9 +30,9 @@ in unregistered projects unless an explicit personal override enables them.
 
 Platform support
 
-The installer and isolated installation checks are tested on macOS. Linux is
-unverified. Native Windows is unsupported because the runtime uses POSIX tools
-and filesystem behavior. Conductor desktop runs on macOS; Linux cloud workspaces
+CI tests the isolated installer, runtime, and repeat installation on macOS and
+Ubuntu. Native Windows is unsupported because the runtime uses POSIX tools and
+filesystem behavior. Conductor desktop runs on macOS. Linux cloud workspaces
 need separate validation. The installer uses Python 3.14 and pinned dependencies.
 
 How it works
@@ -42,7 +42,12 @@ and validation. Independent advisers use the toolkit's default Claude and Codex
 models at maximum effort. agent-context adviser list shows them, adviser set
 chooses others your account supports, and adviser test checks that they work.
 Use --project with adviser list, set, reset or test for a project override.
-Review --wait uses the configured 50-second default. For a longer wait, pass
+When no advisers are selected, put the proposed answer in a private run input
+such as task-inputs/local.json, for example {"answer":"The sample check passed."}.
+Use checkpoint --run ID --local-file FILE, delete that input after success,
+then finish --run ID. Optional request, evidence and checkpoint fields support
+a sanitized task, separate evidence and durable memory in the same local call.
+When advisers are selected, review --wait uses the configured 50-second default. For a longer wait, pass
 --wait 300. If wait_again is true, collect with the same wait option to resume
 the original deadline. Adviser stats reports late replies and busy outcomes
 for retained runs. The default concurrency is one slot per provider.
@@ -64,6 +69,11 @@ State defaults to ~/context. Personal context is ~/context/local/personal.md;
 project context is ~/context/workspaces/<slug>. Machine configuration lives in
 ~/.config/agent-context. The installer preserves context, custom roots, project
 registrations, preferences, unrelated settings, and lead settings.
+
+Empty registration headings stay out of briefings. In settings.json,
+lesson_topics maps a scope and saved lesson key to lowercase topic words.
+Matching a word retrieves the lesson on demand. For example:
+   agent-context config set lesson_topics.personal.gauge-care '["gauge","calibration"]'
 
 Loaded context is sent to the hosted lead model you use. Privacy guards and
 sanitization reduce accidental disclosure; they cannot guarantee confidentiality.

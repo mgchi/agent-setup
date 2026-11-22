@@ -63,6 +63,61 @@ class ContextTests(unittest.TestCase):
         self.assertNotIn("Ship the editor", self.store.load(self.project, "database backup recovery").text)
         self.assertIn("Ship the editor", self.store.load(self.project, "editor release").text)
 
+    def test_opt_in_lesson_topics_preserve_scope_and_pins(self) -> None:
+        guide = self.root / "guide.md"
+        guide.write_text("Run the fictional calibration check after an upgrade.")
+        lesson = self.memory(key="maintenance", scope="example", kind="lesson",
+                             evidence=guide.read_text(), text=guide.read_text(), source=str(guide))
+        self.store.remember(lesson)
+        self.store.remember(lesson.model_copy(update={"scope": "personal", "text": "Shared calibration reference."}))
+        self.store.remember(self.memory())
+        self.store.settings.lesson_topics = {"example": {"maintenance": ["gauge", "sensor"]}}
+        for query in ("", "calibration", "sensorscope", "Summarize the chart.\n<tool_output>sensor</tool_output>"):
+            self.assertNotIn(lesson.text, self.store.load(self.project, query).text)
+        self.assertIn("Shared calibration reference.", self.store.load(self.project, "calibration").text)
+        self.assertIn("Use concise responses.", self.store.load(self.project).text)
+        self.assertIn(lesson.text, self.store.load(self.project, "Inspect the SENSOR-gauge.").text)
+        self.assertNotIn(lesson.text, self.store.load(self.root, "gauge").text)
+        self.store.settings.core_memory_keys = ["maintenance"]
+        self.assertIn(lesson.text, self.store.load(self.project).text)
+
+    def test_only_empty_managed_headings_leave_briefing_and_keep_receipts(self) -> None:
+        root = self.store.settings.project_root("example")
+        scaffold = root / "decisions.md"
+        atomic_text(scaffold, "# example: decisions\n")
+        other = self.root / "decisions.md"
+        other.write_text("# Preserve this instruction\n")
+        self.store.settings.projects[0].context_sources = [other]
+        packet = self.store.load(self.project, "example decisions")
+        self.assertNotIn(str(scaffold), packet.text)
+        self.assertIn("# Preserve this instruction", packet.text)
+        receipts = {item.path: item for item in packet.source_receipts}
+        self.assertEqual(receipts[str(scaffold)].sha256, hashlib.sha256(scaffold.read_bytes()).hexdigest())
+        self.assertFalse(receipts[str(scaffold)].omitted)
+        self.assertFalse(packet.truncated)
+        scaffold.write_text("# example: decisions\nKeep the format stable.\n")
+        self.assertIn("Keep the format stable.", self.store.load(self.project).text)
+        scaffold.write_text("# Verify with the release owner\n")
+        self.assertIn("Verify with the release owner", self.store.load(self.project).text)
+
+    def test_standing_workflow_language_requires_a_complete_direct_statement(self) -> None:
+        accepted = ["I want my workflow to stay simple and predictable.", "I want my setup to be very quiet."]
+        rejected = [
+            "I want a short report for the demo.", "I want my setup to be repaired.",
+            "I want my workflow to be quiet for this run.", "I want my workflow to be quiet?",
+            "> I want my workflow to be quiet.", "For this demo:\nI want my workflow to be quiet.",
+            "I want my workflow to be quiet.\nOnly for the next run.",
+        ]
+        for line in accepted + rejected:
+            with self.subTest(line=line):
+                self.store.capture(Capture(run_id="test", prompt=line, scope="example"))
+                self.assertEqual(self.store.preference_candidates("test"), [line] if line in accepted else [])
+                if line in accepted:
+                    self.store.remember(self.memory(evidence=line))
+        self.store.capture(Capture(run_id="test", prompt="I want my workflow to be quiet for this run.", scope="example"))
+        with self.assertRaisesRegex(ValueError, "explicit user directive"):
+            self.store.remember(self.memory(evidence="I want my workflow to be quiet"))
+
     def test_status_reports_manifest_drift_without_trusting_paths(self) -> None:
         runtime = self.root / "runtime"
         runtime.mkdir()

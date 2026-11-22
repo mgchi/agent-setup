@@ -58,3 +58,17 @@ class OperatingConfigTests(unittest.TestCase):
         with patch("sys.argv", ["agent-context", "--settings", str(self.path), "config", "set", "adviser_wait", "300"]), contextlib.redirect_stdout(output):
             self.assertEqual(main(), 0)
         self.assertEqual(json.loads(output.getvalue())["adviser_wait"]["value"], 300)
+
+    def test_scoped_lesson_topics_support_dotted_keys_and_atomic_reset(self):
+        key = "lesson_topics.sample.meter.care"
+        self.assertEqual(show_config(self.path, key)[key]["source"], "toolkit default")
+        change_config(self.path, key, '["calibration","gauge"]')
+        self.assertEqual(load_settings(self.path).lesson_topics, {"sample": {"meter.care": ["calibration", "gauge"]}})
+        self.assertEqual(show_config(self.path)["settings"][key]["source"], "settings.json")
+        before = self.path.read_bytes()
+        for name, value in ((key, '[""]'), (key, "[]"), (key, '"gauge"'), ("lesson_topics.unknown.x", '["gauge"]')):
+            with self.assertRaises(ConfigError):
+                change_config(self.path, name, value)
+            self.assertEqual(self.path.read_bytes(), before)
+        self.assertIsNone(change_config(self.path, key, None)[key]["value"])
+        self.assertNotIn("meter.care", load_settings(self.path).lesson_topics.get("sample", {}))
