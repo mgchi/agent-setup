@@ -65,10 +65,12 @@ at login and 04:15. Existing lead model settings are preserved.
 Start a new agent session in the registered project and give it a normal task.
 For a durable preference, state it explicitly, for example:
 
-> For this project, prefer the existing components and helpers. Keep public
-> interfaces backward compatible unless I request a breaking change.
+> I prefer to reuse this project's existing components.
 
 The workflow asks the lead to checkpoint supported preferences and decisions.
+It also recognizes standalone statements such as “I want my workflow to stay
+predictable.” The lead checks that the complete statement describes a standing
+preference. One-task requests stay in the current task.
 Check `agent-context status --cwd /absolute/path/to/project` and review the local
 context files to confirm what was retained. Model compliance and client hook
 support affect automatic capture; the store is editable and inspectable.
@@ -94,6 +96,26 @@ feedback, and checkpoints explicit preferences, accepted decisions, or verified
 lessons. Workers are tool-free and cannot authorize actions. They receive
 sanitized task, candidate, and evidence text. Failed or pending advice does not
 block completion after the bounded wait.
+
+When the receipt selects no advisers, stage one JSON file under the run's
+`task-inputs/` directory. The only required field is the proposed outgoing
+answer. A local completion with separate evidence can look like this:
+
+```json
+{"answer": "The sample export passed.", "evidence": "The exported file contained both fixture records."}
+```
+
+Run `agent-context checkpoint --run <id> --local-file <file>`, delete that
+individual input after success, then run `agent-context finish --run <id>`.
+The checkpoint screens the original task, answer and evidence locally. Supply
+a sanitized `request` if the original task was withheld. An optional
+`checkpoint` object accepts the same memory drafts and note as `--file`.
+This path creates no review artifacts or provider calls.
+
+For a paused task, a short local handoff can capture the decision, the last
+verified checkout and the next authorized action. Three paired replays of
+public changes produced the same first actions with a plain note and a labeled
+one. [Handoff experiment](experiments/handoff-pilot.md)
 
 Adviser defaults are `claude-fable-5-2` and `gpt-6.2-astra` at maximum effort.
 `claude-fable-5-2` needs Claude Code 2.1.290 or newer, and `gpt-6.2-astra` needs
@@ -202,6 +224,7 @@ agent-context config show --project my-project
 agent-context config show refresh.max_window_days
 agent-context config set refresh.sources.slack.enabled false
 agent-context config set refresh.incremental_budget_usd 5.50
+agent-context config set lesson_topics.personal.gauge-care '["gauge","calibration"]'
 agent-context config reset refresh.sources.slack.enabled
 ```
 
@@ -215,6 +238,7 @@ Project adviser settings are changed with `adviser set` and `adviser reset`.
 | `capture_days`, `run_days` | Retention, 7 and 14 days |
 | `max_runs`, `max_memory`, `max_capture` | Retained counts, 32, 48, and 80 |
 | `max_local_bytes`, `max_database_bytes` | Storage budgets, 256 MiB and 8 MiB |
+| `lesson_topics.<scope>.<lesson-key>` | Optional list of 1 to 32 lowercase topic words for a saved lesson. Reset to restore ordinary retrieval |
 | `call_timeout`, `idle_timeout`, `provider_wait` | Overall call, output idle, and slot waits, 480, 180, and 20 seconds |
 | `adviser_wait` | Lead wait budget, 50 seconds |
 | `adviser_concurrency.<provider>` | Simultaneous calls, 1 per provider |
@@ -259,7 +283,9 @@ the current packet before checkpointing. `agent-context finish --run <id>` check
 the checkpoint against current sources and the local checkout, including dirty
 and untracked content. It does not attest remote synchronization, hosted checks,
 deployment, or resource cleanup. A changed finalized run needs a new checkpoint
-in a new run. Empty checkpoints use `checkpoint --run <id> --none`.
+in a new run. With selected advisers an empty checkpoint uses
+`checkpoint --run <id> --none`. The local completion file defaults to an
+empty checkpoint when its `checkpoint` field is absent.
 
 Use `context_sources` for the small standing brief, and `topic_sources` or
 `topic_dirs` for explicit topic files or directories whose immediate Markdown
@@ -269,6 +295,15 @@ unregistered projects and personal scope cannot retrieve them. Mark a retired
 topic with `Context-Status: historical`, `superseded`, or `archived` to preserve it
 on disk while excluding it from automatic topic retrieval. Core source contents
 reserve room for later sources, including a short live brief.
+
+Empty project notes created by registration keep their source receipts and
+fingerprints without taking space in the briefing. To retrieve a detailed
+saved lesson only on its topic, set `lesson_topics` in the machine settings.
+For example, `{"lesson_topics":{"personal":{"gauge-care":["gauge","calibration"]}}}`
+shows the personal lesson keyed `gauge-care` when the request contains either
+whole word, ignoring case. A project slug limits the rule to that project's
+lesson. Existing lessons follow their usual retrieval behavior until configured.
+An explicit `core_memory_keys` pin keeps a lesson available on every task.
 
 Optional `source_max_age_days` maps registered source paths to freshness limits.
 These measure file age, not truth. `knowledge_revision` records the product Git
@@ -343,7 +378,7 @@ ineligible. Advisers run tool-free in their existing isolated directories.
 Use `--diff` for eligible working changes or `--evidence` for a curated excerpt.
 Set `--adviser-access none` on the project to turn off file selection.
 
-Run review inputs belong in `<context-root>/local/runs/<run-id>/task-inputs/`.
+Run review and local completion inputs belong in `<context-root>/local/runs/<run-id>/task-inputs/`.
 After capture, prefer a deletion-only patch to remove those individual regular
 files. A bare `rm -- <files>` is also supported, subject to the client's command
 policy. Directory listings stay local; recursive cleanup,

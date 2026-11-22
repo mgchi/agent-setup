@@ -23,6 +23,15 @@ from refresh_health import SOURCE_NAMES, RefreshHealth, RefreshState, SourceName
 from team_runtime import ADVISER_DEFAULTS, FOLLOW_DEFAULT, Provider, redact_text, resolve_provider
 
 Scope = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$", max_length=48)]
+MEMORY_KEY_PATTERN = r"^[a-z0-9][a-z0-9_.-]{0,79}$"
+MemoryKey = Annotated[str, StringConstraints(pattern=MEMORY_KEY_PATTERN)]
+TopicWord = Annotated[str, StringConstraints(pattern=r"^[a-z0-9]{2,40}$")]
+TopicWords = Annotated[list[TopicWord], Field(min_length=1, max_length=32)]
+PROJECT_NOTES = ("context", "decisions", "playbook", "inbox")
+_WORKFLOW_TRAIT = r"(?:(?:very|really) )?(?:accessible|consistent|fast|flexible|good|light(?:weight)?|minimal|predictable|quiet|reliable|simple)"
+_WORKFLOW_PREFERENCE = re.compile(
+    rf"i want my (?:setup|workflow) to (?:be|stay|remain) {_WORKFLOW_TRAIT}"
+    rf"(?:(?:, | (?:and|but|yet) (?:also )?){_WORKFLOW_TRAIT})*[.!]?", re.IGNORECASE)
 AdviserName = Literal["claude", "codex"]
 Effort = Literal["low", "medium", "high", "xhigh", "max", "toolkit-default"]
 EFFORTS = get_args(Effort)
@@ -226,6 +235,7 @@ class Settings(BaseModel):
     max_local_bytes: int = Field(default=268435456, ge=1048576)
     max_database_bytes: int = Field(default=8388608, ge=1048576)
     core_memory_keys: list[str] = Field(default_factory=list)
+    lesson_topics: dict[Scope, dict[MemoryKey, TopicWords]] = Field(default_factory=dict)
     instruction_sources: dict[str, Path] = Field(default_factory=dict)
     local_adapters: dict[Scope, LocalAdapter] = Field(default_factory=dict, max_length=12)
 
@@ -233,7 +243,7 @@ class Settings(BaseModel):
     @classmethod
     def known_defaults(cls, values: list[Provider]) -> list[Provider]:
         for provider in values:
-            resolve_provider(provider)  # Only a known adviser may follow the toolkit.
+            resolve_provider(provider)
         return values
 
     @field_validator("context_root")
@@ -284,7 +294,7 @@ class Settings(BaseModel):
 
 class Memory(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    key: str = Field(pattern=r"^[a-z0-9][a-z0-9_.-]{0,79}$")
+    key: MemoryKey
     kind: Literal["preference", "decision", "lesson"]
     scope: Scope
     text: str = Field(min_length=5, max_length=1200)
@@ -403,7 +413,7 @@ _CLEAN_TAG = re.compile(r"""
                         | [^\s"'<>={}]+ ) )?
             ) )*
     \s* (/?) >""", re.VERBOSE)
-_CLEAN_END = re.compile(r"\s*>")  # What follows the name of a well-formed closing tag.
+_CLEAN_END = re.compile(r"\s*>")
 _OPEN_QUOTE = re.compile(r"=\s*'[^']*\Z")
 
 
@@ -545,6 +555,11 @@ def terms(query: str) -> set[str]:
     return {word for word in re.findall(r"[a-z0-9][a-z0-9_-]{2,}", query.lower()) if word not in _STOP_WORDS}
 
 
+def empty_project_note(path: Path, root: Path, scope: str, body: str) -> bool:
+    return (scope != "personal" and path.parent == root and path.name in {f"{name}.md" for name in PROJECT_NOTES}
+            and body.strip() in {"", f"# {scope}: {path.stem}"})
+
+
 def _well_formed(prompt: str, raw: str, start: int, tag: re.Match[str]) -> re.Match[str] | None:
     """Match the rest of a well-formed tag after its name. `raw` is its line, at `start`."""
     closes, name = tag.group(1), tag.group(2)
@@ -642,12 +657,23 @@ def captured_user_text(capture: Capture) -> str:
     return direct_user_text(capture.prompt, complete=complete)
 
 
-def preference_evidence(evidence: str) -> bool:
-    return "?" not in evidence and bool(re.match(
+def preference_evidence(evidence: str, user_text: str = "") -> bool:
+    line = evidence.strip()
+    if "?" in line:
+        return False
+    if re.match(
         r"(?i)^(?:remember (?:my preference|that i prefer)|from now on[, :]|"
         r"my (?:default|preference) is|i prefer\b|always\b|never\b|"
-        r"(?:do not|don't)\b.{0,160}\b(?:ever|by default|in future|going forward)\b)", evidence.strip()
-    ))
+        r"(?:do not|don't)\b.{0,160}\b(?:ever|by default|in future|going forward)\b)", line
+    ):
+        return True
+    if not _WORKFLOW_PREFERENCE.fullmatch(line):
+        return False
+    # A partial quote can drop a one-task qualifier. Require a standalone captured statement.
+    lines = [part.strip() for part in user_text.splitlines()]
+    return any(part == line and not (index and lines[index - 1].endswith(":"))
+               and not (index + 1 < len(lines) and re.match(r"(?i)(?:for|until|during|just|only)\b", lines[index + 1]))
+               for index, part in enumerate(lines))
 
 
 def decision_evidence(evidence: str) -> bool:
@@ -668,9 +694,10 @@ def validate_memory_capture(memory: Memory, capture: Capture) -> None:
     if memory.kind in {"preference", "decision"}:
         if memory.source != f"session:{memory.run_id}":
             raise ValueError("User statements must cite their captured session.")
-        if memory.evidence not in captured_user_text(capture):
+        user_text = captured_user_text(capture)
+        if memory.evidence not in user_text:
             raise ValueError("Evidence must be literal, unquoted text from the captured user prompt.")
-        if memory.kind == "preference" and not (capture.preference_import or preference_evidence(memory.evidence)):
+        if memory.kind == "preference" and not (capture.preference_import or preference_evidence(memory.evidence, user_text)):
             raise ValueError("A preference requires an explicit user directive.")
         if memory.kind == "decision" and not decision_evidence(memory.evidence):
             raise ValueError("A decision requires explicit user acceptance of the stated choice.")
@@ -888,8 +915,9 @@ class Store:
         capture = self.captured(run_id)
         if not capture:
             return []
-        return [line for line in captured_user_text(capture).splitlines()
-                if 5 <= len(line) <= 500 and preference_evidence(line)][:10]
+        user_text = captured_user_text(capture)
+        return [line for line in user_text.splitlines()
+                if 5 <= len(line) <= 500 and preference_evidence(line, user_text)][:10]
 
     def decision_candidates(self, run_id: str) -> list[str]:
         capture = self.captured(run_id)
@@ -1104,6 +1132,8 @@ class Store:
                 paths.extend(project.topic_paths())
             for path in dict.fromkeys(paths):
                 body = read_text(path, 24000)
+                if empty_project_note(path, project_root, scope, body):
+                    continue
                 if re.search(r"(?im)^context-status:\s*(?:historical|superseded|archived)\s*$", body):
                     continue
                 filename_terms = terms(path.stem) | terms(path.stem.replace('-', ' ').replace('_', ' '))
@@ -1146,24 +1176,30 @@ class Store:
             if receipt.stale:
                 warnings.append(f"Source exceeds its {age_limit:g}-day freshness limit: {path}")
 
-        notices = {path: f"[Source omitted from packet; read full file: {path}]" for path in background}
+        visible = {path: (body, receipt) for path, (body, receipt) in background.items()
+                   if receipt.truncated or receipt.stale or not empty_project_note(path, project_root, scope, body)}
+        notices = {path: f"[Source omitted from packet; read full file: {path}]" for path in visible}
         minimum_sections = [*([warning] if warning else []), *notices.values()]
         minimum_size = len("\n\n".join(minimum_sections))
         if minimum_size > self.settings.packet_chars:
             raise ValueError("Packet limit cannot include every source location. Increase packet_chars or reduce context sources.")
         sections: list[str] = []
-        sources: list[str] = []
-        receipts: list[SourceReceipt] = []
         omitted: list[str] = []
         truncated = False
-        ranked = sorted(self.memories(scope), key=lambda item: (len(terms(item.text + " " + item.key) & query_terms),
-                        item.key in self.settings.core_memory_keys, item.updated), reverse=True)
+        words = set(re.findall(r"[a-z0-9]+", direct_user_text(query, complete=True).lower()))
+        ranked = []
+        for item in self.memories(scope):
+            topics = self.settings.lesson_topics.get(item.scope, {}).get(item.key) if item.kind == "lesson" else None
+            score = len(words.intersection(topics)) if topics else len(terms(item.text + " " + item.key) & query_terms)
+            pinned = item.key in self.settings.core_memory_keys
+            if item.kind != "preference" and not pinned and (topics or query_terms) and not score:
+                continue
+            ranked.append((score, pinned, item))
+        ranked.sort(key=lambda row: (row[0], row[1], row[2].updated), reverse=True)
         memory_lines: list[str] = []
         heading = "Saved context (current instructions take precedence):\n"
         remaining = min(3000, self.settings.packet_chars - minimum_size - (2 if minimum_size else 0)) - len(heading)
-        for item in ranked:
-            if query_terms and item.kind != "preference" and item.key not in self.settings.core_memory_keys and not terms(item.text + " " + item.key) & query_terms:
-                continue
+        for _, _, item in ranked:
             line = f"- [{item.key}; {item.source}] {item.text}"
             if len(memory_lines) == 12 or len(line) + 1 > remaining:
                 truncated = True
@@ -1175,9 +1211,9 @@ class Store:
         if warning:
             sections.append(warning)
         reserved = sum(len(notice) + 2 for notice in notices.values())
-        fair_share = max(0, (self.settings.packet_chars - len("\n\n".join(sections)) - reserved - 200 * len(background)) // max(1, len(background)))
-        allowances = {path: min(len(body), fair_share) for path, (body, _) in background.items()}
-        for path, (body, receipt) in background.items():
+        fair_share = max(0, (self.settings.packet_chars - len("\n\n".join(sections)) - reserved - 200 * len(visible)) // max(1, len(visible)))
+        allowances = {path: min(len(body), fair_share) for path, (body, _) in visible.items()}
+        for path, (body, receipt) in visible.items():
             reserved -= len(notices[path]) + 2
             allowances.pop(path)
             available = self.settings.packet_chars - len("\n\n".join(sections)) - (2 if sections else 0) - reserved - sum(allowances.values())
@@ -1194,11 +1230,10 @@ class Store:
                     receipt.omitted = True
                     omitted.append(str(path))
             sections.append(section)
-            if not receipt.omitted:
-                sources.append(str(path))
-            receipts.append(receipt)
             truncated = truncated or receipt.truncated
         combined = "\n\n".join(sections)
+        receipts = [receipt for _, receipt in background.values()]
+        sources = [receipt.path for receipt in receipts if not receipt.omitted]
         return Packet(scope=scope, text=combined, sources=sources, truncated=truncated,
                       source_receipts=receipts, omitted_sources=omitted, warnings=warnings)
 

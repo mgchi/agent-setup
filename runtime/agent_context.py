@@ -21,7 +21,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from context_store import (
-    DEFAULT_COOLDOWNS, EFFORTS, AdviserOverride, Capture, Cooldown, Memory, Packet, Project, Scope, Session, Settings, Store, atomic_text,
+    DEFAULT_COOLDOWNS, EFFORTS, PROJECT_NOTES, AdviserOverride, Capture, Cooldown, Memory, Packet, Project, Scope, Session, Settings, Store, atomic_text,
     clean, digest, direct_user_text, git, linked_path, load_settings, lock, modified,
     read_text, read_packet_source, save_model, sensitive_path,
 )
@@ -126,6 +126,14 @@ class CheckpointInput(BaseModel):
     note: str = Field(default="", max_length=1000)
 
 
+class LocalCompletion(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    answer: str = Field(min_length=1)
+    request: str | None = Field(default=None, min_length=1)
+    evidence: str = ""
+    checkpoint: CheckpointInput = Field(default_factory=CheckpointInput)
+
+
 class ProjectList(BaseModel):
     projects: list[Project]
 
@@ -154,11 +162,11 @@ def add_project(settings_path: Path, slug: str, path: Path, *, advisers: bool | 
         projects = [project for project in settings.projects if project.slug != slug]
         updated = Settings.model_validate({**settings.model_dump(), 'projects': [*projects, registration]})
         root = updated.project_root(slug)
-        for name in ('context', 'decisions', 'playbook', 'inbox'):
+        for name in PROJECT_NOTES:
             target = root / f'{name}.md'
             if linked_path(target):
                 raise ValueError("Project context cannot traverse symlinks.")
-        for name in ('context', 'decisions', 'playbook', 'inbox'):
+        for name in PROJECT_NOTES:
             target = root / f'{name}.md'
             if not target.exists():
                 atomic_text(target, f'# {slug}: {name}\n')
@@ -499,6 +507,13 @@ def cli_command(settings_path: Path = SETTINGS_PATH) -> str:
     return shlex.join([str(Path.home() / ".local/bin/agent-context"), "--settings", str(settings_path)])
 
 
+def local_completion_instruction(run: Run, directory: Path, settings_path: Path) -> str:
+    bundle = shlex.quote(str(directory / "task-inputs" / "local.json"))
+    return (f"No advisers selected. Stage the outgoing answer in the local JSON file "
+            f"(answer, optional sanitized request, evidence, checkpoint). Run {cli_command(settings_path)} "
+            f"checkpoint --run {run.run_id} --local-file {bundle}, then finish --run {run.run_id} with the same CLI.")
+
+
 def receipt(store: Store, run_id: str, *, packet: Packet | None = None,
             settings_path: Path = SETTINGS_PATH) -> Receipt:
     directory = run_path(store, run_id)
@@ -512,14 +527,17 @@ def receipt(store: Store, run_id: str, *, packet: Packet | None = None,
             review_result = PhaseResult(run_id=run_id, phase="review", signature="", status="complete",
                 finished=time.time(), outcomes=[Outcome(ok=False, kind="worker-error",
                     detail="Review reference is unreadable. Continue with available advice.")])
+    if run.providers:
+        instruction = (f"Lead alone edits. Collect advice with {cli_command(settings_path)} collect --run {run_id}. "
+                       f"Stage a sanitized request, candidate answer, and evidence under {directory / 'task-inputs'}. "
+                       "Review once with --request-file and --wait. If wait_again is true, collect --wait resumes the same budget. "
+                       "Then checkpoint durable memory or --none and run finish. Send only sanitized task details to advisers. "
+                       "Collaborator failure permits continuing with the lead; never change authentication or retention to repair it.")
+    else:
+        instruction = local_completion_instruction(run, directory, settings_path)
     return Receipt(run_id=run_id, directory=str(directory), packet=packet,
                    assessment=phase_state(store, run_id, "assessment", run.prompt_hash),
-                   review=review_result,
-                   instruction=f"Lead alone edits. Collect advice with {cli_command(settings_path)} collect --run {run_id}. "
-                   f"Stage a sanitized request, candidate answer, and evidence under {directory / 'task-inputs'}. "
-                   f"Review once with --request-file and --wait. If wait_again is true, collect --wait resumes the same budget. "
-                   f"Then checkpoint durable memory or --none. Send only sanitized task details to advisers. "
-                   f"Collaborator failure permits continuing with the lead; never change authentication or retention to repair it.")
+                   review=review_result, instruction=instruction)
 
 
 def provider_identity(provider: Provider) -> str:
@@ -721,18 +739,23 @@ def evidence_text(paths: list[Path], disclosure: DisclosureIndex | None = None) 
     return "\n\n".join(sections)
 
 
+def screen_candidate(store: Store, run: Run, final: str, request: str | None) -> tuple[DisclosureIndex, str]:
+    disclosure = disclosure_index(store)
+    assessment = phase_state(store, run.run_id, "assessment", run.prompt_hash)
+    if request is None and assessment and any(outcome.kind == "disclosure" for outcome in assessment.outcomes):
+        raise DisclosureError("sanitized-request-required")
+    full_request = request if request is not None else complete_text(run_path(store, run.run_id) / "request.txt")
+    disclosure.scan(full_request)
+    disclosure.scan(final)
+    return disclosure, full_request
+
+
 def review(store: Store, settings_path: Path, run_id: str, final: str, *,
            evidence: list[Path] | None = None, include_diff: bool = False,
            request: str | None = None, repo_files: list[Path] | None = None) -> Receipt:
     run = read_run(store, run_id)
     directory = run_path(store, run_id)
-    disclosure = disclosure_index(store)
-    assessment = phase_state(store, run_id, "assessment", run.prompt_hash)
-    if request is None and assessment and any(outcome.kind == "disclosure" for outcome in assessment.outcomes):
-        raise DisclosureError("sanitized-request-required")
-    full_request = request if request is not None else complete_text(directory / "request.txt")
-    disclosure.scan(full_request)
-    disclosure.scan(final)
+    disclosure, full_request = screen_candidate(store, run, final, request)
     text = evidence_text(evidence or [], disclosure)
     if include_diff:
         text = text + "\n" + safe_diff(run.cwd, disclosure)
@@ -920,6 +943,15 @@ def refresh(store: Store, run_id: str, *, settings_path: Path = SETTINGS_PATH) -
     return receipt(store, run_id, packet=packet, settings_path=settings_path)
 
 
+def local_checkpoint(store: Store, run_id: str, bundle: LocalCompletion) -> CheckpointResult:
+    run = read_run(store, run_id)
+    if run.providers:
+        raise ValueError("The local completion path requires a run with no selected advisers.")
+    disclosure, _ = screen_candidate(store, run, bundle.answer, bundle.request)
+    disclosure.scan(bundle.evidence)
+    return checkpoint(store, run_id, bundle.checkpoint)
+
+
 def checkpoint(store: Store, run_id: str, request: CheckpointInput) -> CheckpointResult:
     directory = run_path(store, run_id)
     with lock(store.local / "cleanup.lock"), lock(directory / "checkpoint.lock"):
@@ -1018,25 +1050,30 @@ def hook(store: Store, settings_path: Path, event: HookInput, client: str) -> st
     capture = store.captured(run.run_id)
     if capture:
         store.capture(capture.model_copy(update={"final": final}))
-    reconcile(store, run.run_id)
-    checkpointed = (directory / "checkpoint.json").exists()
-    candidates = store.preference_candidates(run.run_id) + store.decision_candidates(run.run_id)
-    if not run.providers and not candidates and run.scope == "personal":
-        if not checkpointed:
-            checkpoint(store, run.run_id, CheckpointInput(note="No explicit preference or accepted decision candidate; lead may retain verified lessons separately."))
+    if run.providers:
+        reconcile(store, run.run_id)
+    # Some clients display only the final reply. A reminder after checkpoint would hide it.
+    if (directory / "checkpoint.json").exists():
         return ""
-    # The checkpoint is the lead's own finish, and review stays optional. Blocking
-    # after it forces one more reply, which hides the answer in last-message views.
-    if checkpointed:
-        return ""
+    if (not run.providers and run.scope == "personal"
+            and not store.preference_candidates(run.run_id) and not store.decision_candidates(run.run_id)):
+        try:
+            screen_candidate(store, run, event.last_assistant_message or "", None)
+        except DisclosureError:
+            pass  # The reminder lets the lead supply a sanitized candidate.
+        else:
+            note = "" if event.last_assistant_message else "The client supplied no final answer text to screen."
+            checkpoint(store, run.run_id, CheckpointInput(note=note))
+            return ""
     store.set_session(previous.model_copy(update={"continued": True, "updated": time.time()}))
-    reason = (f"{CONTINUATION} Finish the existing run {run.run_id}: collect available assessment/review with "
-              f"{cli_command(settings_path)} collect --run {run.run_id} --wait; address material findings using your judgment. "
-              "Use the same wait budget. Pending or failed providers permit completion. Do not launch an automatic review from this reminder. "
-              "Checkpoint only explicit durable preferences, accepted decisions, or verified reusable lessons; "
-              f"otherwise run {cli_command(settings_path)} checkpoint --run {run.run_id} --none. "
-              "Then restate the complete final answer, because some clients show only the last message of a turn. "
-              "This reminder is automatic and is not memory evidence. You get one reminder only.")
+    if run.providers:
+        instruction = (f"Collect available advice with {cli_command(settings_path)} collect --run {run.run_id} --wait. "
+                       "Use the same wait budget and address material findings. Pending or failed providers permit completion. "
+                       "No new review is needed from this reminder. Checkpoint supported memory or --none, then run finish.")
+    else:
+        instruction = local_completion_instruction(run, directory, settings_path)
+    reason = (f"{CONTINUATION} Finish the existing run {run.run_id}. {instruction} "
+              "Then restate the complete final answer. This automatic reminder supplies no memory evidence.")
     return json.dumps({"decision": "block", "reason": reason})
 
 
@@ -1135,6 +1172,9 @@ def parser() -> argparse.ArgumentParser:
             group = command.add_mutually_exclusive_group(required=True)
             group.add_argument("--file", type=Path)
             group.add_argument("--none", action="store_true")
+            if name == "checkpoint":
+                group.add_argument("--local-file", type=Path,
+                                   help="Screen an outgoing answer and evidence, then checkpoint a run without advisers.")
         if name == "worker":
             command.add_argument("--phase", choices=["assessment", "review"], required=True)
             command.add_argument("--signature", required=True)
@@ -1220,8 +1260,13 @@ def main() -> int:
                    request=complete_text(options.request_file) if options.request_file else None)
             output = collect(store, options.run, options.wait, settings_path=options.settings)
         elif options.command in {"checkpoint", "remember"}:
-            request = CheckpointInput.model_validate_json(complete_text(options.file)) if options.file else CheckpointInput()
-            output = checkpoint(store, options.run, request)
+            if options.command == "checkpoint" and options.local_file:
+                if options.local_file.resolve().parent != run_path(store, options.run) / "task-inputs":
+                    raise ValueError("Place the local completion file in this run's task-inputs directory.")
+                output = local_checkpoint(store, options.run, LocalCompletion.model_validate_json(complete_text(options.local_file)))
+            else:
+                request = CheckpointInput.model_validate_json(complete_text(options.file)) if options.file else CheckpointInput()
+                output = checkpoint(store, options.run, request)
         elif options.command == "refresh":
             output = refresh(store, options.run, settings_path=options.settings)
         elif options.command == "finish":

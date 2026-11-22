@@ -160,7 +160,7 @@ def private_command(command: str, cwd: Path, index: DisclosureIndex) -> bool:
             return False
         if any(word == '--settings' or word.startswith('--settings=') for word in words[offset + 1:]):
             return False
-        file_options = {'--file', '--answer-file', '--request-file', '--prompt-file', '--evidence'}
+        file_options = {'--file', '--local-file', '--answer-file', '--request-file', '--prompt-file', '--evidence'}
         for offset, word in enumerate(words):
             if word in file_options and (offset + 1 >= len(words) or not private(path_at(words[offset + 1], cwd), index)):
                 return False

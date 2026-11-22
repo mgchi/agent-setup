@@ -70,6 +70,10 @@ call from an isolated installation of your change:
   retention, process cleanup, failure handling, and disclosure checks.
 - Keep provider failures recoverable and adviser capabilities restricted.
 - Keep instructions concise and examples independent of any particular company.
+- Review comments in the changed code. Remove narration and stale claims. Encode
+  a repeatable constraint in a name, type or test where possible. Preserve public
+  contracts, license headers, tooling directives and non-obvious external constraints.
+  This practice adapts [pstack's scoped comment review](https://github.com/cursor/plugins/blob/main/pstack/skills/no-comments/SKILL.md).
 - Describe observable behavior and validation in the pull request.
 
 Run `./scripts/check` before submitting. CI repeats the checks on macOS and Linux.

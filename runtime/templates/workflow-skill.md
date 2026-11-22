@@ -13,7 +13,17 @@ If an entry hook receipt is present, reuse its run ID. Otherwise save a sanitize
 
 Workers marked `AGENT_CONTEXT_WORKER=1` or `AGENT_CONTEXT_REFRESH=1` skip entry, orchestration, and checkpoints. Privacy guards still apply. Never recursively launch advisers from a worker.
 
-## Collaboration
+## Task and evidence
+
+Follow the person's local working preferences. For a requested judgment, give the recommendation, the evidence and what would change the call. An accepted shortcut can include its revisit condition in the existing decision. For a request to finish, verify each authorized destination and report the result for each. On pickup, read the existing project-local handoff, check the worktree and revision against its last verification, and resume the next authorized action. A plain note is sufficient.
+
+When reviewing changed code, remove comments that repeat it or describe behavior that has changed. Prefer a clear name or a regression test when it can express the constraint. Keep licenses, tool directives, public contracts and verified reasons a maintainer cannot infer from the code.
+
+## Completion without advisers
+
+When the receipt selects no advisers, put the outgoing candidate in `task-inputs/local.json` under that run. The minimum JSON is `{"answer":"The fixture check passed."}`. Add `evidence` for separate outgoing evidence, `request` for a sanitized restatement if the original was withheld, and `checkpoint` for supported memory drafts or a note. Run the receipt's `checkpoint --local-file` command, remove the individual input after it succeeds, then run `finish --run <id>`. This path screens the full text locally and creates no adviser review.
+
+## Selected advisers
 
 The lead owns all edits, tool calls, validation, and the final answer. Registered projects use independent Claude and Codex advisers by default, at the models and effort that `agent-context adviser list` shows. These workers are tool-free and cannot authorize an action. Preserve the lead's selected model and effort.
 
@@ -21,7 +31,7 @@ Send only a sanitized task, candidate answer, and narrowly selected evidence. Ne
 
 When the project permits selected repository files, review may include `--repo-file path/to/file` for specific committed text the task requires. Inspect each file before sharing it with the hosted advisers. Use `--evidence` for a smaller excerpt.
 
-Once the run ID exists, stage disposable request, answer and evidence files in `{{CONTEXT_ROOT}}/local/runs/<run-id>/task-inputs/`. After capture, prefer a deletion-only patch naming those individual files. A bare `rm -- <files>` is also supported where the client's command policy permits it. Do not use forced or recursive cleanup, globs, pipelines or mixed public/private patches. Canonical context and run receipts stay protected.
+Stage disposable request, answer and evidence files in `{{CONTEXT_ROOT}}/local/runs/<run-id>/task-inputs/`. After capture, use a deletion-only patch naming the individual inputs or a bare `rm -- <files>` if supported. Preserve canonical context and receipts.
 
 Use `agent-context review --run <id> --answer-file <private-file> --request-file <private-file> --evidence <private-file> --wait`. Run commands that name private files bare: a pipe, redirect, or variable makes the privacy guard treat those paths as outgoing data. Reconcile any available advice against evidence. Use one wait budget. The default is 50 seconds. When a longer budget is selected and the receipt says wait_again, call collect --wait to resume that budget. Reuse an explicit seconds argument if one was supplied. Credit limits, usage errors, timeouts, and pending advice permit the lead to finish. Projects configured with `collaboration: "exchange"` run one reciprocal assessment round; preserve accepted independent findings if an exchange fails. The lead owns synthesis. Inspect `agent-context status` for diagnostics; do not keep retrying a cooling-down provider.
 
@@ -39,7 +49,7 @@ automatic retrieval. Optional memory `review_after` and `expires` timestamps
 bound time-sensitive claims. Retirement reconciles runtime-owned inbox entries;
 human-authored source prose still needs deliberate curation.
 
-Retain only explicit preferences, accepted decisions, and verified reusable lessons with their supporting evidence. Use the existing key when correcting a memory. Checkpoint with `agent-context checkpoint --run <id> --file <private-file>` using the CLI's schema, or `agent-context checkpoint --run <id> --none` when nothing durable changed. External context sources remain authoritative and are never rewritten by the runtime. Curate accepted changes there through the project's existing approved workflow; the local memory/outbox is a retrieval aid. If authoritative sources changed, run `agent-context refresh --run <id>`, read its current packet, then checkpoint. Run `agent-context finish --run <id>` against the final checkout. A changed checkout or source invalidates completion; start a new run to record the new revision. The outbox records project decisions once; do not duplicate an inbox entry manually.
+Retain explicit preferences, accepted decisions and verified reusable lessons with their evidence and stable keys. Quote the full user statement for a standing workflow preference. A one-task request belongs in that task. When advisers were selected, checkpoint with `agent-context checkpoint --run <id> --file <private-file>` or `--none` after review. Curate external sources through the project's approved workflow. If an authoritative source changed, run `agent-context refresh --run <id>`, read the current packet, then checkpoint. Run `agent-context finish --run <id>` against the final checkout. A changed finalized checkout or source needs a new run. The outbox records each project decision once.
 
 Context has fixed retrieval, memory, capture, run, artifact, and database budgets. Maintenance removes expired task material and consolidates retained context. Automatic hooks cover participating client sessions only. Durable memory requires explicit, evidence-backed checkpoints; arbitrary app activity and every conversation are not captured. Do not save whole conversations or speculative lessons. Remove temporary prompts, answers, and evidence after capture. A missing runtime permits manual selective context reads and append-once project decisions.
 
