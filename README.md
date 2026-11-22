@@ -179,10 +179,16 @@ guards, and supports checkpoints.
 
 ### Which sessions are covered?
 
-The installer puts hooks in user-level Claude and Codex configuration. Normal
-local sessions using that configuration can run the workflow in a terminal or
-Conductor. Conductor's prompt is additional guidance, not the mechanism that
-makes terminal sessions work.
+The installer puts hooks and managed instruction sections in user-level Claude
+and Codex configuration. Terminal and local Conductor sessions can use the same
+`AGENTS.md`, `CLAUDE.md` and workflow skill. Conductor stores its own General
+preferences in Repository Settings. An optional [prompt snippet](runtime/templates/conductor-prompt.txt)
+is available for that field. [Conductor's agent behavior reference](https://www.conductor.build/docs/reference/agent-behavior)
+
+Fresh installations leave Conductor's legacy TOML file alone. An upgrade
+removes the old installer-owned prompt block only when it matches the
+previously installed template. The installer backs up that edit and preserves
+custom prompt text, unrelated settings and file permissions.
 
 Installation alone does not prove execution. Codex hook trust must be approved;
 client versions, configuration roots, command-line options, and local policy

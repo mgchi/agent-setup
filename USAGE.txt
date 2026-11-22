@@ -22,6 +22,10 @@ accounts, connectors, and access to the configured models require their own
 setup. Restart agent sessions after installation. In Codex, approve installed
 hooks through /hooks when prompted; hook approval is a separate step.
 
+Local Conductor sessions use the same client instructions and hooks. Conductor's
+own General preferences live in Repository Settings. On upgrade, an exact
+installer-owned prompt in the legacy file is backed up and retired.
+
 Register project paths on each machine. Use agent-context project list to see
 registrations and agent-context status --cwd /path/to/project to inspect one.
 Registered Git worktrees share context. Separate projects and nested repositories

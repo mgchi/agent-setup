@@ -1,1 +1,1 @@
-Use {{HOME}}/.claude/skills/context-workflow/SKILL.md and follow the entry receipt. With no advisers, screen and checkpoint locally. With selected advisers, share sanitized inputs and use one bounded wait. The lead owns edits and validation at the selected model and effort. Respect project exclusions. Keep private context under {{CONTEXT_ROOT}} out of outgoing artifacts and messages.
+Use the context-workflow skill and follow the task receipt. Keep private context local and verify the result at each requested destination.
