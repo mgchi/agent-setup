@@ -37,23 +37,35 @@ support depend on your installed clients and accounts.
 You need Git and [uv](https://docs.astral.sh/uv/getting-started/installation/).
 On macOS, install uv with `brew install uv`.
 
-Install and authenticate the Claude and Codex CLIs separately. An existing
-Conductor installation can use the same local setup. This project does not install
-Conductor, supply model access, or transfer connector authentication.
+Start with a signed-in Claude Code or Codex client. A local Conductor session
+can use the same setup. Choose a short project name and the path to the
+repository where you want to work. Replace `my-project` and
+`/path/to/project` below.
 
 ```sh
 git clone https://github.com/mgchi/agent-setup.git
-cd agent-setup
-./install
-export PATH="$HOME/.local/bin:$PATH"
-agent-context project add my-project /absolute/path/to/project
-agent-context status --cwd /absolute/path/to/project
+./agent-setup/install --brief
+~/.local/bin/agent-context project add my-project /path/to/project --brief
 ```
 
-Add the PATH line to your shell startup file if needed. Restart your agent sessions
-after installation. In Codex, approve the installed hooks through `/hooks` when
-prompted. Until hooks are approved, use the installed workflow skill's manual
-entry instructions.
+Open a new session **in that project** and give it a normal task. In Codex,
+approve the installed hooks in `/hooks` if prompted. The first project
+prompt through each client emits **“Project context loaded for my-project.
+You're ready.”** New registrations start with context alone.
+
+If your client hides hook messages, check from the project directory:
+
+```sh
+~/.local/bin/agent-context status --brief
+```
+
+This names the project and the clients whose prompt hooks have run. To check
+one client, use `status --client codex` or `status --client claude`. While
+waiting, it gives the next step. Running a manual task or opening a session
+alone does not create a prompt receipt.
+
+The remaining examples use `agent-context` on your PATH. Add
+`export PATH="$HOME/.local/bin:$PATH"` to your shell startup file if needed.
 
 The installer uses Python 3.14 and pinned dependencies. It adds runtime commands,
 workflow skills, managed instruction sections, and hooks for session entry,
@@ -165,17 +177,17 @@ Registered Git worktrees share project context. Separate projects and nested
 repositories remain isolated. Advisers are disabled for unregistered projects
 unless you explicitly enable a personal override.
 
-To start with context alone, or change an existing project's automatic advice:
+New projects start with advisers off. To enable automatic advice for a project,
+register it with the following option.
 
 ```sh
-agent-context project add my-project /absolute/path/to/project --advisers off
+agent-context project add my-project /absolute/path/to/project --advisers on
 ```
 
-Use `--advisers on` to enable automatic advice. Omitting the option preserves an
-existing registration's choice; new registrations retain the existing default
-of enabled advisers. A task can still explicitly request `team: both` or disable
-advice with `team: off`. Context-only operation still loads context, applies tool
-guards, and supports checkpoints.
+Use `--advisers off` to turn it off again. Re-registering a project without the
+option preserves its choice. For one task, request both advisers with
+`team: both` or disable advice with `team: off`. Context-only operation still
+loads context, applies tool guards, and supports checkpoints.
 
 ### Which sessions are covered?
 
@@ -197,7 +209,10 @@ worker sessions that suppress recursion, and clients that ignore user settings
 do not provide the same coverage. Other computers and cloud environments need
 their own installation and project registrations.
 
-Check for a fresh run receipt from an actual session. `project list` shows the
+The first matching prompt creates an empty local marker beside the machine
+settings. A marker records that a client handled a project prompt at least
+once. Check for a fresh run receipt to verify a particular session after a
+client or configuration change. `project list` shows the
 registered projects; `status --cwd /path/to/repository` reports the selected
 scope. `personal` means that no project context was selected. Registration
 creates starter files; it does not research the repository or maintain its
@@ -487,6 +502,7 @@ registrations, custom roots, unrelated settings, and lead model choices.
 
 | Installer option | Effect |
 | --- | --- |
+| `--brief` | Print the next setup step and any configuration notices. Interactive terminals use this format automatically. |
 | `--home PATH` | Use an isolated destination and skip launchctl activation |
 | `--no-activate` | Skip activation during a normal installation |
 | `--seed FILE` | Read an explicit local configuration seed |
@@ -590,8 +606,13 @@ evaluation should use repeated real tasks, held-out checks, user corrections,
 adviser defect catches, total usage, and time to an accepted result. Unit tests
 validate the evaluator without contacting providers.
 
-The [initial pilot observations](experiments/context-pilot.md) document both
-successful cases and an unavailable batch, with the limits of the comparison.
+The initial pilot records both successful cases and an unavailable batch.
+[Supplied-context decision pilot](experiments/context-pilot.md)
+
+Two simulated newcomers completed the quick start. In a separate trial, ten
+settings tasks passed on the first attempt with automatic context and with
+manually supplied notes. The report includes the onboarding task, scoring
+sheet, timings, and limits. [First use and ten project tasks](experiments/first-use-and-project-tasks.md)
 
 Ideas and questions belong in [Discussions](https://github.com/mgchi/agent-setup/discussions).
 Report reproducible bugs through [Issues](https://github.com/mgchi/agent-setup/issues/new/choose).

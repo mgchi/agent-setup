@@ -16,7 +16,7 @@ from unittest.mock import patch
 from context_store import Capture, Cooldown, LocalAdapter, Memory, Project, Settings, Store, atomic_text, digest, load_settings, lock, save_model
 from agent_context import (
     CONTINUATION, Advice, CheckpointInput, HookInput, LocalCompletion, MemoryDraft, PhaseResult,
-    add_project, begin, call_provider, check_advisers, checkpoint, collect, hook, list_advisers, main, parser, read_run, release,
+    add_project, begin, brief_status, call_provider, check_advisers, checkpoint, cli_command, collect, first_project_prompt, hook, list_advisers, main, parser, read_run, release,
     adviser_stats, client_version, cooldown_seconds, finish, local_checkpoint, provider_slot, review, run_adapter, run_path, select_providers, set_adviser, worker,
 )
 from disclosure import DisclosureError
@@ -245,6 +245,44 @@ class WorkflowTests(unittest.TestCase):
         checkpoint(self.store, second, CheckpointInput())
         self.assertEqual(second, self.start(turn="turn-2"))
         self.assertNotEqual(second, self.start())
+
+    def test_readiness_needs_a_project_prompt_and_confirms_each_client_once(self) -> None:
+        def status(client=None):
+            return brief_status(self.store, self.settings_path, self.cwd, client)
+        prompt = "Describe the current project."
+        self.start(prompt, turn="first")
+        hook(self.store, self.settings_path, self.event("SessionStart"), "codex")
+        for client, text in (("manual", prompt), ("codex", "context: personal"), ("claude", "")):
+            output = json.loads(hook(self.store, self.settings_path, self.event("UserPromptSubmit", prompt=text), client))
+            self.assertNotIn("systemMessage", output)
+        self.assertIn("Waiting", status())
+        submit = self.event("UserPromptSubmit", prompt=prompt, turn_id="real")
+        for client in ("codex", "claude"):
+            self.assertIn("Waiting", status(client))
+            first = json.loads(hook(self.store, self.settings_path, submit, client))
+            self.assertEqual(first["systemMessage"], "Project context loaded for example. You're ready.")
+            self.assertIn("Context workflow receipt", first["hookSpecificOutput"]["additionalContext"])
+            self.assertIn("Project prompt received", status(client))
+            second = json.loads(hook(self.store, self.settings_path, submit, client))
+            self.assertNotIn("systemMessage", second)
+        self.assertIn("Claude Code, Codex", status())
+        self.assertIn("Waiting", brief_status(self.store, self.root / "other-settings.json", self.cwd))
+        self.assertIn("Personal context only", brief_status(self.store, self.settings_path, self.root))
+
+    def test_concurrent_first_prompt_and_unwritable_receipt(self) -> None:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            first = list(pool.map(lambda _: first_project_prompt(self.settings_path, "example", "claude"), range(4)))
+        self.assertEqual(first.count(True), 1)
+        with patch("agent_context.first_project_prompt", side_effect=PermissionError()):
+            response = json.loads(hook(self.store, self.settings_path, self.event("UserPromptSubmit", prompt="Hello"), "codex"))
+        self.assertIn("could not be saved", response["systemMessage"])
+        self.assertIn("Context workflow receipt", response["hookSpecificOutput"]["additionalContext"])
+        self.assertIn("Waiting", brief_status(self.store, self.settings_path, self.cwd, "codex"))
+
+    def test_completion_instructions_use_the_launcher_of_the_running_installation(self) -> None:
+        runtime = self.root / ".local/share/agent-context/tool_privacy.py"
+        with patch("tool_privacy.__file__", str(runtime)):
+            self.assertIn(str(self.root / ".local/bin/agent-context"), cli_command(self.settings_path))
 
     def test_team_directives_after_an_unclosed_tag_are_honored(self) -> None:
         self.assertEqual(len(read_run(self.store, self.start(turn="default")).providers), 2)
@@ -676,14 +714,19 @@ class ProjectTests(unittest.TestCase):
         self.assertTrue(add_project(self.settings_path, 'example', self.repo, advisers=True).advisers)
 
     def test_registration_default_and_new_root_preserve_adviser_policy(self) -> None:
-        self.assertTrue(add_project(self.settings_path, 'example', self.repo).advisers)
-        add_project(self.settings_path, 'example', self.repo, advisers=False)
+        self.assertFalse(add_project(self.settings_path, 'example', self.repo).advisers)
+        add_project(self.settings_path, 'example', self.repo, advisers=True)
         other = self.root / 'another clone'
         other.mkdir()
         self.git(other, 'init', '-q')
         project = add_project(self.settings_path, 'example', other)
-        self.assertFalse(project.advisers)
+        self.assertTrue(project.advisers)
         self.assertEqual(project.roots, [self.repo, other])
+
+    def test_existing_registration_without_an_advisers_field_keeps_historical_policy(self) -> None:
+        self.settings_path.write_text(json.dumps({"context_root": str(self.root / "context"),
+            "projects": [{"slug": "example", "roots": [str(self.repo)]}]}))
+        self.assertTrue(add_project(self.settings_path, 'example', self.repo).advisers)
 
     def test_nested_and_unregistered_repositories_stay_isolated(self) -> None:
         add_project(self.settings_path, 'example', self.repo)

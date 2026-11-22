@@ -6,21 +6,26 @@ knowledge, credentials, transcripts, and account settings outside the checkout.
 
 Install on a Mac
 
-Install Git and uv (brew install uv), then run:
+Start with Git, uv (brew install uv) and one signed-in Claude Code or Codex
+client. Replace my-project and /path/to/project with your project name and path.
 
    git clone https://github.com/mgchi/agent-setup.git
-   cd agent-setup
-   ./install
-   agent-context project add my-project /absolute/path/to/project
+   ./agent-setup/install --brief
+   ~/.local/bin/agent-context project add my-project /path/to/project --brief
+
+Open a new session in that project. In Codex, approve the installed hooks
+in /hooks if prompted. Send a normal task. The first project prompt in each
+client emits a one-time confirmation. In the project directory, run
+~/.local/bin/agent-context status --brief to see which client has received
+a project prompt. Use status --client codex or --client claude to check one.
 
 If needed, add ~/.local/bin to PATH in your shell startup file:
 
    export PATH="$HOME/.local/bin:$PATH"
 
-Install and sign in to the Claude and Codex CLIs separately. Conductor, agent
-accounts, connectors, and access to the configured models require their own
-setup. Restart agent sessions after installation. In Codex, approve installed
-hooks through /hooks when prompted; hook approval is a separate step.
+New registrations start with advisers off. To enable automatic advice, use
+project add with --advisers on. Re-registering without an adviser flag
+preserves the project's existing choice. Advisers use their own CLI accounts.
 
 Local Conductor sessions use the same client instructions and hooks. Conductor's
 own General preferences live in Repository Settings. On upgrade, an exact

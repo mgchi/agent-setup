@@ -7,6 +7,10 @@ setup_home=$HOME
 setup_seed=
 setup_activate=true
 setup_custom_home=false
+setup_brief=false
+if [ -t 1 ]; then
+    setup_brief=true
+fi
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -27,8 +31,12 @@ while [ "$#" -gt 0 ]; do
             setup_activate=false
             shift
             ;;
+        --brief)
+            setup_brief=true
+            shift
+            ;;
         --help|-h)
-            echo 'Usage: ./install [--home PATH] [--seed FILE] [--no-activate]'
+            echo 'Usage: ./install [--home PATH] [--seed FILE] [--no-activate] [--brief]'
             echo 'Installs the local workflow. --home isolates installation and skips launchctl.'
             exit 0
             ;;
@@ -63,16 +71,26 @@ for setup_path in "$setup_home/.local" "$setup_home/.local/share" "$setup_runtim
     fi
 done
 mkdir -p -- "$setup_runtime"
+run_setup_uv() {
+    if [ "$setup_brief" = true ]; then
+        "$setup_uv" --quiet "$@"
+    else
+        "$setup_uv" "$@"
+    fi
+}
 if [ ! -e "$setup_runtime/.venv" ]; then
-    "$setup_uv" venv --python 3.14 "$setup_runtime/.venv"
+    run_setup_uv venv --python 3.14 "$setup_runtime/.venv"
 fi
 if [ ! -x "$setup_runtime/.venv/bin/python" ]; then
     echo 'Existing runtime environment has no working Python. Preserve it before repairing.' >&2
     exit 1
 fi
-"$setup_uv" pip install --python "$setup_runtime/.venv/bin/python" --requirement "$setup_source/requirements.txt"
+run_setup_uv pip install --python "$setup_runtime/.venv/bin/python" --requirement "$setup_source/requirements.txt"
 
 set -- --apply --home "$setup_home"
+if [ "$setup_brief" = true ]; then
+    set -- "$@" --brief
+fi
 if [ -n "$setup_seed" ]; then
     set -- "$@" --seed "$setup_seed"
 fi
@@ -80,4 +98,6 @@ if [ "$setup_activate" = true ] && [ "$setup_custom_home" = false ] && [ "$(unam
     set -- "$@" --activate
 fi
 "$setup_runtime/.venv/bin/python" "$setup_source/runtime/install_local.py" "$@"
-echo 'Installed. Add ~/.local/bin to PATH, restart your agent session, and register your projects.'
+if [ "$setup_brief" = false ]; then
+    echo 'Installed. Restart your agent session to load the hooks.'
+fi

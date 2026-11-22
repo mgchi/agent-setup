@@ -504,13 +504,22 @@ def main() -> None:
     parser.add_argument('--home', type=Path, default=HOME_DIR)
     parser.add_argument('--seed', type=Path)
     parser.add_argument('--activate', action='store_true')
+    parser.add_argument('--brief', action='store_true')
     arguments = parser.parse_args()
     if not arguments.apply:
         plan = build_plan(arguments.home)
         load_seed(arguments.seed)
         print(json.dumps({'validated_files': [str(write.path) for write in plan.files], 'skill_aliases': [str(link.path) for link in plan.links]}, indent=2))
         return
-    print(install(arguments.home, seed_path=arguments.seed, activate=arguments.activate).model_dump_json(indent=2))
+    result = install(arguments.home, seed_path=arguments.seed, activate=arguments.activate)
+    if arguments.brief:
+        cli = shlex.quote(str(arguments.home / '.local/bin/agent-context'))
+        print('Agent Setup installed.')
+        print(f'To register a project, run {cli} project add my-project /path/to/project --brief')
+        for note in result.notes:
+            print(note)
+    else:
+        print(result.model_dump_json(indent=2))
 
 
 if __name__ == '__main__':

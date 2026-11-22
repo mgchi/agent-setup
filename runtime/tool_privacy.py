@@ -33,6 +33,13 @@ def denial(category: str) -> str:
         'permissionDecisionReason': f'Local disclosure guard blocked this operation ({safe}).'}})
 
 
+def installed_cli() -> Path:
+    runtime = Path(__file__).resolve().parent
+    if runtime.parts[-3:] == ('.local', 'share', 'agent-context'):
+        return runtime.parents[1] / 'bin/agent-context'
+    return Path.home() / '.local/bin/agent-context'
+
+
 def strings(value: JsonValue) -> list[str]:
     if isinstance(value, str):
         return [value]
@@ -141,7 +148,7 @@ def private_command(command: str, cwd: Path, index: DisclosureIndex) -> bool:
     if executable in {'ls', '/bin/ls', '/usr/bin/ls'}:
         arguments = local_arguments(words[1:], 'laAdh1t')
         return arguments is not None and all(private(path_at(word, cwd), index) for word in arguments)
-    cli = str(Path.home() / '.local/bin/agent-context')
+    cli = str(installed_cli())
     if executable in {'agent-context', cli} and len(words) > 1:
         offset = 1
         if words[offset] == '--settings' or words[offset].startswith('--settings='):

@@ -30,13 +30,14 @@ from operating_config import ConfigError, change_config, show_config
 from repository_evidence import selected_files
 from team_runtime import ADVISER_DEFAULTS, FOLLOW_DEFAULT, Outcome, Provider, invoke, resolve_provider
 from disclosure import DisclosureError, DisclosureIndex, RawScanner, build_index, regular
-from tool_privacy import denial, guard, staged
+from tool_privacy import denial, guard, installed_cli, staged
 from instruction_copies import export_instruction_bundle
 import migrate_local
 
 SETTINGS_PATH = Path.home() / ".config/agent-context/settings.json"
 SCRIPT = Path(__file__).resolve()
 CONTINUATION = "[context-workflow-checkpoint]"
+CLIENT_NAMES = {"claude": "Claude Code", "codex": "Codex"}
 Phase = Literal["assessment", "review"]
 
 
@@ -146,7 +147,7 @@ def add_project(settings_path: Path, slug: str, path: Path, *, advisers: bool | 
     path = path.resolve()
     top = git(path, ["rev-parse", "--show-toplevel"])
     common = git(path, ["rev-parse", "--path-format=absolute", "--git-common-dir"])
-    registration = Project(slug=slug, roots=[Path(top) if top else path],
+    registration = Project(slug=slug, roots=[Path(top) if top else path], advisers=False,
                            common_dirs=[Path(common)] if common else [])
     with lock(settings_path.parent / 'install.lock'):
         settings = load_settings(settings_path)
@@ -504,7 +505,7 @@ def phase_state(store: Store, run_id: str, phase: Phase, signature: str) -> Phas
 
 
 def cli_command(settings_path: Path = SETTINGS_PATH) -> str:
-    return shlex.join([str(Path.home() / ".local/bin/agent-context"), "--settings", str(settings_path)])
+    return shlex.join([str(installed_cli()), "--settings", str(settings_path)])
 
 
 def local_completion_instruction(run: Run, directory: Path, settings_path: Path) -> str:
@@ -1017,6 +1018,42 @@ def context_message(result: Receipt) -> str:
     return "\n\n".join(parts)
 
 
+def prompt_marker(settings_path: Path, scope: Scope, client: str) -> Path:
+    # Arrival is evidence about this client installation. Keep it out of portable project knowledge.
+    path = settings_path.with_name(settings_path.name + ".prompts") / f"{scope}.{client}"
+    if linked_path(path) or (path.exists() and not path.is_file()):
+        raise ValueError("Expected a local prompt receipt.")
+    return path
+
+
+def first_project_prompt(settings_path: Path, scope: Scope, client: str) -> bool:
+    marker = prompt_marker(settings_path, scope, client)
+    marker.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        marker.touch(mode=0o600, exist_ok=False)
+        return True
+    except FileExistsError:
+        return False
+
+
+def brief_status(store: Store, settings_path: Path, cwd: Path, client: str | None = None) -> str:
+    if orchestration_excluded(store.settings, cwd):
+        return "This repository uses its own workflow."
+    project = store.settings.project(store.scope(cwd))
+    if not project:
+        return "Personal context only. Register this project with agent-context project add <project-name> ."
+    mode = "automatic advisers on" if project.advisers else "context only"
+    label = f"{project.slug} ({mode})."
+    clients = [client] if client else CLIENT_NAMES
+    seen = [CLIENT_NAMES[name] for name in clients if prompt_marker(settings_path, project.slug, name).is_file()]
+    if seen:
+        return f"{label} Project prompt received in {', '.join(seen)}."
+    if client == "codex":
+        return f"{label} Waiting for Codex. Review the hooks in /hooks, then send a normal request in this project."
+    name = CLIENT_NAMES[client] if client else "Claude Code or Codex"
+    return f"{label} Waiting for a project prompt. Send a normal request from a new {name} session in this project."
+
+
 def hook(store: Store, settings_path: Path, event: HookInput, client: str) -> str:
     if event.hook_event_name == "PreToolUse":
         return guard(disclosure_index(store), Path(event.cwd or os.getcwd()), event.tool_name, event.tool_input)
@@ -1037,9 +1074,20 @@ def hook(store: Store, settings_path: Path, event: HookInput, client: str) -> st
             return json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext":
                 f"Continue existing run {previous.run_id}. This hook reminder is not a user statement and supplies no memory evidence."}})
         result = begin(store, settings_path, cwd, event.prompt, client=client, session=event.session_id, turn=event.turn_id)
-        if previous and result.packet and previous.packet_hash == digest(result.packet.text):
+        scope = result.packet.scope if result.packet else "personal"
+        message = ""
+        if client in CLIENT_NAMES and scope != "personal" and event.prompt.strip() and not event.prompt.startswith(CONTINUATION):
+            try:
+                if first_project_prompt(settings_path, scope, client):
+                    message = f"Project context loaded for {scope}. You're ready."
+            except (OSError, ValueError):
+                message = "Project context loaded. The local prompt receipt could not be saved."
+        if not message and previous and result.packet and previous.packet_hash == digest(result.packet.text):
             result.packet = None
-        return json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": context_message(result)}})
+        response = {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": context_message(result)}}
+        if message:
+            response["systemMessage"] = message
+        return json.dumps(response)
     if event.hook_event_name != "Stop" or not previous or event.stop_hook_active or previous.continued:
         return ""
     directory = run_path(store, previous.run_id)
@@ -1117,8 +1165,9 @@ def parser() -> argparse.ArgumentParser:
     add = project_commands.add_parser('add')
     add.add_argument('slug')
     add.add_argument('path', type=Path)
-    add.add_argument('--advisers', choices=['on', 'off'], help='Set automatic advice for this project; omission preserves the existing choice.')
+    add.add_argument('--advisers', choices=['on', 'off'], help='Enable or disable automatic advice. New projects start with context only.')
     add.add_argument('--adviser-access', choices=['none', 'selected-files'])
+    add.add_argument('--brief', action='store_true', help='Show the project mode and next step.')
     project_commands.add_parser('list')
     adviser = commands.add_parser('adviser')
     adviser_commands = adviser.add_subparsers(dest='adviser_command', required=True)
@@ -1146,6 +1195,9 @@ def parser() -> argparse.ArgumentParser:
         command = commands.add_parser(name)
         if name in {"load", "status", "begin", "privacy"}:
             command.add_argument("--cwd", type=Path, default=Path.cwd())
+        if name == "status":
+            command.add_argument("--brief", action="store_true", help="Show first-prompt readiness for this project.")
+            command.add_argument("--client", choices=CLIENT_NAMES, help="Show brief readiness for one client.")
         if name == "privacy":
             command.add_argument("--instruction-copies", type=Path)
         if name in {"load", "begin"}:
@@ -1218,7 +1270,10 @@ def main() -> int:
                                  advisers=None if options.advisers is None else options.advisers == 'on', adviser_access=options.adviser_access)
                       if options.project_command == 'add'
                       else ProjectList(projects=load_settings(options.settings).projects))
-            print(result.model_dump_json(indent=2))
+            if options.project_command == 'add' and options.brief:
+                print(brief_status(Store(load_settings(options.settings)), options.settings, options.path))
+            else:
+                print(result.model_dump_json(indent=2))
             return 0
         if options.command == 'adviser':
             if options.adviser_command == 'stats':
@@ -1288,6 +1343,8 @@ def main() -> int:
         elif options.command == "forget":
             store.forget(options.scope, options.key)
             output = "Memory retired from the store and generated inbox entries. Human-authored source documents are unchanged."
+        elif options.command == "status" and (options.brief or options.client):
+            output = brief_status(store, options.settings, options.cwd, options.client)
         else:
             output = store.status(options.cwd)
         if output:
