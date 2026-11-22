@@ -62,6 +62,7 @@ class InstallTests(unittest.TestCase):
         self.assertTrue(codex['features']['existing'])
         self.assertTrue(codex['features']['hooks'])
         self.assertIn('# Retain this comment.', self.codex.read_text())
+        self.assertNotIn(str(self.conductor), result.changed_files)
         conductor = tomlkit.parse(self.conductor.read_text())
         self.assertEqual(conductor['models']['claude_code']['default_model'], 'native-lead')
         self.assertEqual(conductor['models']['claude_code']['review_model'], 'native-review')
@@ -157,6 +158,52 @@ class InstallTests(unittest.TestCase):
         old = 'Before\n<!-- local:start -->\nold\n<!-- local:end -->\nAfter\n'
         self.assertEqual(managed_section(old, 'local', 'new'), 'Before\n<!-- local:start -->\nnew\n<!-- local:end -->\nAfter\n')
 
+    def legacy_conductor_prompt(self) -> str:
+        runtime = self.home / '.local/share/agent-context'
+        source = 'Read {{HOME}}/fixture and use {{CONTEXT_ROOT}} for the sample.\n'
+        atomic_text(runtime / 'templates/conductor-prompt.txt', source)
+        atomic_text(runtime / 'installation.json', json.dumps({'files': {'templates/conductor-prompt.txt': digest(source)}}))
+        document = tomlkit.parse(self.conductor.read_text())
+        text = source.replace('{{HOME}}', str(self.home)).replace('{{CONTEXT_ROOT}}', str(self.settings.context_root))
+        document['prompts']['general'] = managed_section(document['prompts']['general'], 'agent-context-workflow', text) + 'User suffix.\n'
+        original = '# Retain the annotation.\n' + tomlkit.dumps(document)
+        atomic_text(self.conductor, original)
+        return original
+
+    def test_fresh_install_uses_client_instructions_without_creating_conductor_settings(self) -> None:
+        self.conductor.unlink()
+        install(self.home)
+        self.assertFalse(self.conductor.exists())
+        self.assertIn('context-workflow', self.global_file.read_text())
+        self.assertIn('Use the context-workflow skill', (self.home / '.local/share/agent-context/templates/conductor-prompt.txt').read_text())
+
+    def test_old_conductor_prompt_retires_once_and_backs_up_the_exact_original(self) -> None:
+        before = self.legacy_conductor_prompt()
+        self.conductor.chmod(0o640)
+        result = install(self.home)
+        self.assertIn(str(self.conductor), result.changed_files)
+        after = self.conductor.read_text()
+        self.assertIn('# Retain the annotation.', after)
+        self.assertEqual(tomlkit.parse(after)['prompts']['general'], 'Keep my existing instructions.\n\nUser suffix.\n')
+        self.assertEqual(tomlkit.parse(after)['models'], tomlkit.parse(before)['models'])
+        self.assertEqual(self.conductor.stat().st_mode & 0o777, 0o640)
+        backup = json.loads((Path(result.backup_directory) / 'manifest.json').read_text())
+        record = next(item for item in backup['paths'] if item['path'] == str(self.conductor))
+        self.assertEqual(Path(record['backup']).read_text(), before)
+        self.assertEqual(install(self.home).changed_files, [])
+
+    def test_custom_or_unverifiable_legacy_conductor_prompt_is_preserved(self) -> None:
+        before = self.legacy_conductor_prompt()
+        for text in (before.replace('for the sample.', 'with a custom rule.'), before.replace(':end -->', ':changed -->'),
+                     '[[invalid TOML <!-- agent-context-workflow:start -->'):
+            atomic_text(self.conductor, text)
+            self.assertNotIn(self.conductor, [write.path for write in build_plan(self.home).files])
+            self.assertEqual(self.conductor.read_text(), text)
+        atomic_text(self.conductor, before)
+        manifest = self.home / '.local/share/agent-context/installation.json'
+        atomic_text(manifest, '{"files":{"templates/conductor-prompt.txt":"different"}}')
+        self.assertNotIn(self.conductor, [write.path for write in build_plan(self.home).files])
+
     def test_unexpected_file_and_skill_links_are_preserved(self) -> None:
         target = self.home / 'other-settings.json'
         atomic_text(target, '{}')
@@ -200,17 +247,18 @@ class InstallTests(unittest.TestCase):
         self.assertNotIn('agent-context-workflow', self.global_file.read_text())
 
     def test_partial_write_failure_restores_content_and_modes(self) -> None:
+        self.legacy_conductor_prompt()
         self.claude.chmod(0o640)
         before = {filename: (filename.read_bytes(), filename.stat().st_mode & 0o777)
                   for filename in (self.claude, self.codex, self.hooks, self.conductor, self.global_file)}
         real_write = install_local.atomic_text
 
-        def fail_on_conductor(filename: Path, text: str) -> None:
-            if filename == self.conductor:
+        def fail_on_instructions(filename: Path, text: str) -> None:
+            if filename == self.global_file:
                 raise OSError('Simulated unavailable configuration file')
             real_write(filename, text)
 
-        with patch.object(install_local, 'atomic_text', side_effect=fail_on_conductor):
+        with patch.object(install_local, 'atomic_text', side_effect=fail_on_instructions):
             with self.assertRaises(OSError):
                 install(self.home, seed_path=self.seed_path)
         for filename, (content, mode) in before.items():

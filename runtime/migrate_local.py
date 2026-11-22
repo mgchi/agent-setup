@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal
@@ -14,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from tomlkit.items import Table
 
 from context_store import atomic_text
-from install_local import InstallReceipt, backup_paths, existing_text, managed_section
+from install_local import InstallReceipt, backup_paths, existing_text, remove_sections
 
 Digest = Annotated[str, StringConstraints(pattern=r'^[0-9a-f]{64}$')]
 Section = Annotated[str, StringConstraints(pattern=r'^[A-Za-z0-9][A-Za-z0-9_-]*$')]
@@ -104,26 +103,6 @@ def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
 
 def parse_json(text: str) -> object:
     return json.loads(text, object_pairs_hook=unique_object)
-
-
-def remove_sections(text: str, sections: list[str]) -> str:
-    if len(set(sections)) != len(sections):
-        raise ValueError('Duplicate managed section selection')
-    for name in sections:
-        managed_section(text, name, '')  # Reuse the installer's ownership-marker validation.
-        start, end = f'<!-- {name}:start -->', f'<!-- {name}:end -->'
-        if start not in text:
-            continue
-        before, remainder = text.split(start, 1)
-        content, after = remainder.split(end, 1)
-        if (before and not before.endswith('\n')) or (after and not after.startswith(('\n', '\r\n'))):
-            raise ValueError(f'Managed markers must occupy their own lines: {name}')
-        if not content.startswith(('\n', '\r\n')) or not content.endswith('\n'):
-            raise ValueError(f'Managed markers must occupy their own lines: {name}')
-        if re.search(r'<!--\s*[\w-]+:(?:start|end)\b', content):
-            raise ValueError(f'Nested managed section: {name}')
-        text = before + (after[2:] if after.startswith('\r\n') else after[1:] if after.startswith('\n') else after)
-    return text
 
 
 def remove_hooks(text: str, commands: list[str]) -> str:

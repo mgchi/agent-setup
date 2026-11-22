@@ -144,9 +144,61 @@ def existing_text(path: Path) -> str:
     return path.read_text() if path.exists() else ''
 
 
+def remove_sections(text: str, sections: list[str]) -> str:
+    if len(set(sections)) != len(sections):
+        raise ValueError('Duplicate managed section selection')
+    for name in sections:
+        managed_section(text, name, '')
+        start, end = f'<!-- {name}:start -->', f'<!-- {name}:end -->'
+        if start not in text:
+            continue
+        before, remainder = text.split(start, 1)
+        content, after = remainder.split(end, 1)
+        if (before and not before.endswith('\n')) or (after and not after.startswith(('\n', '\r\n'))):
+            raise ValueError(f'Managed markers must occupy their own lines: {name}')
+        if not content.startswith(('\n', '\r\n')) or not content.endswith('\n'):
+            raise ValueError(f'Managed markers must occupy their own lines: {name}')
+        if re.search(r'<!--\s*[\w-]+:(?:start|end)\b', content):
+            raise ValueError(f'Nested managed section: {name}')
+        text = before + (after[2:] if after.startswith('\r\n') else after[1:] if after.startswith('\n') else after)
+    return text
+
+
 def template(name: str, home: Path, context_root: Path | None = None) -> str:
     return ((TEMPLATES / name).read_text().replace('{{HOME}}', str(home))
             .replace('{{CONTEXT_ROOT}}', str(context_root or home / 'context')))
+
+
+def retire_conductor_prompt(home: Path, context_root: Path, runtime: Path) -> FileWrite | None:
+    path = home / '.conductor/settings.toml'
+    previous = runtime / 'templates/conductor-prompt.txt'
+    if linked_path(path) or linked_path(previous) or not path.is_file() or not previous.is_file():
+        return None
+    start, end = '<!-- agent-context-workflow:start -->', '<!-- agent-context-workflow:end -->'
+    try:
+        source = existing_text(previous)
+        if '{{HOME}}' not in source:
+            return None
+        manifest = json.loads(existing_text(runtime / 'installation.json'))
+        if not isinstance(manifest, dict) or not isinstance(manifest.get('files'), dict):
+            return None
+        if manifest['files'].get('templates/conductor-prompt.txt') != digest(source):
+            return None
+        original = existing_text(path)
+        if start not in original:
+            return None
+        document = tomlkit.parse(original)
+        prompts = document.get('prompts')
+        general = prompts.get('general') if isinstance(prompts, Table) else None
+        if not isinstance(general, str) or general.count(start) != 1 or general.count(end) != 1:
+            return None
+        expected = source.replace('{{HOME}}', str(home)).replace('{{CONTEXT_ROOT}}', str(context_root))
+        if f'{start}\n{expected.rstrip()}\n{end}' not in general:
+            return None
+        prompts['general'] = remove_sections(general, ['agent-context-workflow'])
+    except (OSError, ValueError, tomlkit.exceptions.TOMLKitError):
+        return None
+    return FileWrite(path=path, text=tomlkit.dumps(document), mode=path.stat().st_mode & 0o777)
 
 
 def table_at(document: TOMLDocument | Table, key: str) -> Table:
@@ -231,14 +283,9 @@ def build_plan(home: Path) -> InstallPlan:
     codex_hooks = merge_hooks(read_json(hooks_path), 'codex', cli)
     files.append(FileWrite(path=hooks_path, text=codex_hooks.model_dump_json(indent=2) + '\n'))
 
-    conductor_path = home / '.conductor/settings.toml'
-    conductor = tomlkit.parse(existing_text(conductor_path))
-    prompts = table_at(conductor, 'prompts')
-    original_prompt = prompts.get('general', '')
-    if not isinstance(original_prompt, str):
-        raise ValueError('Conductor general prompt must be text')
-    prompts['general'] = managed_section(original_prompt, 'agent-context-workflow', template('conductor-prompt.txt', home, context_root))
-    files.append(FileWrite(path=conductor_path, text=tomlkit.dumps(conductor)))
+    retired_prompt = retire_conductor_prompt(home, context_root, runtime)
+    if retired_prompt:
+        files.append(retired_prompt)
 
     instruction_paths = [home / relative for relative in ('.agents/AGENTS.md', '.codex/AGENTS.md', '.claude/CLAUDE.md')]
     canonical_instructions = [path for path in instruction_paths if not linked_path(path)]
