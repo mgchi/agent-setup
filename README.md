@@ -177,17 +177,17 @@ Registered Git worktrees share project context. Separate projects and nested
 repositories remain isolated. Advisers are disabled for unregistered projects
 unless you explicitly enable a personal override.
 
-To start with context alone, or change an existing project's automatic advice:
+New projects start with advisers off. To enable automatic advice for a project,
+register it with the following option.
 
 ```sh
-agent-context project add my-project /absolute/path/to/project --advisers off
+agent-context project add my-project /absolute/path/to/project --advisers on
 ```
 
-Use `--advisers on` to enable automatic advice. Omitting the option preserves an
-existing registration's choice. New projects start with advisers off. A task
-can explicitly request `team: both` or disable
-advice with `team: off`. Context-only operation still loads context, applies tool
-guards, and supports checkpoints.
+Use `--advisers off` to turn it off again. Re-registering a project without the
+option preserves its choice. For one task, request both advisers with
+`team: both` or disable advice with `team: off`. Context-only operation still
+loads context, applies tool guards, and supports checkpoints.
 
 ### Which sessions are covered?
 
@@ -502,6 +502,7 @@ registrations, custom roots, unrelated settings, and lead model choices.
 
 | Installer option | Effect |
 | --- | --- |
+| `--brief` | Print the next setup step and any configuration notices. Interactive terminals use this format automatically. |
 | `--home PATH` | Use an isolated destination and skip launchctl activation |
 | `--no-activate` | Skip activation during a normal installation |
 | `--seed FILE` | Read an explicit local configuration seed |
@@ -605,8 +606,13 @@ evaluation should use repeated real tasks, held-out checks, user corrections,
 adviser defect catches, total usage, and time to an accepted result. Unit tests
 validate the evaluator without contacting providers.
 
-The [initial pilot observations](experiments/context-pilot.md) document both
-successful cases and an unavailable batch, with the limits of the comparison.
+The initial pilot records both successful cases and an unavailable batch.
+[Supplied-context decision pilot](experiments/context-pilot.md)
+
+Two simulated newcomers completed the quick start. In a separate trial, ten
+settings tasks passed on the first attempt with automatic context and with
+manually supplied notes. The report includes the onboarding task, scoring
+sheet, timings, and limits. [First use and ten project tasks](experiments/first-use-and-project-tasks.md)
 
 Ideas and questions belong in [Discussions](https://github.com/mgchi/agent-setup/discussions).
 Report reproducible bugs through [Issues](https://github.com/mgchi/agent-setup/issues/new/choose).
